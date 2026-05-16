@@ -7,7 +7,7 @@ from threading import Thread
 from flask import Flask
 
 # ---------------------------------------------------------
-# 1. SERVER WEB FANTASMA (In cima per rispondere subito a Render)
+# 1. SERVER WEB FANTASMA (Risposta immediata per Render)
 # ---------------------------------------------------------
 app = Flask(__name__)
 
@@ -44,7 +44,6 @@ TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
 FILE_STORICO     = "storico_saldo.txt"
 
-# AGGIORNAMENTO AGGIUNTI I 3 TRADE PERSI (-0.08, -0.37, -1.02)
 saldo_virtuale = 106.63  
 stats = {"vinti": 4, "persi": 4, "pareggi": 0, "totali": 8}
 last_update_id = -1
@@ -56,7 +55,6 @@ trade_attivo = {
     "min_prezzo_raggiunto": None, "in_attesa_risultato": False
 }
 
-# Storico aggiornato con la progressione delle nuove perdite
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
         f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n108.02\n107.65\n106.63\n")
@@ -102,8 +100,8 @@ def leggi_messaggio_telegram():
     global last_update_id
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        params = {"offset": last_update_id + 1, "timeout": 5}
-        r = requests.get(url, params=params, timeout=10).json()
+        params = {"offset": last_update_id + 1, "timeout": 2} # Ridotto il timeout per risposte più veloci
+        r = requests.get(url, params=params, timeout=5).json()
         if r["result"]:
             for update in r["result"]:
                 last_update_id = update["update_id"]
@@ -146,15 +144,33 @@ def registra_risultato(testo):
     elif profit < -0.02: stats["persi"] += 1; emoji = "❌ PERSO"
     else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO"
     with open(FILE_STORICO, "a") as f: f.write(f"{saldo_virtuale:.2f}\n")
-    send_telegram(f"Trade registrato: *{profit:+.2f} EUR* - {emoji}")
+    send_telegram(f"Trade registered: *{profit:+.2f} EUR* - {emoji}")
     invia_report()
     trade_attivo["aperto"] = False
     trade_attivo["in_attesa_risultato"] = False
     return True
 
 # ---------------------------------------------------------
-# 4. CALCOLI SATELLITARI E INDICATORI (FILTRI)
+# 4. CONTROLLI DI SESSIONE E MERCATO CHIUSO
 # ---------------------------------------------------------
+def is_mercato_aperto():
+    # Il Forex chiude il venerdì sera (giorno 4) e riapre la domenica sera (giorno 6)
+    giorno_settimana = datetime.now().weekday() 
+    ora_corrente = datetime.now().hour
+    
+    if giorno_settimana == 4 and ora_corrente >= 23: # Venerdì dopo le 23
+        return False
+    if giorno_settimana == 5: # Sabato tutto il giorno
+        return False
+    if giorno_settimana == 6 and ora_corrente < 23: # Domenica prima delle 23
+        return False
+    return True
+
+def is_orario_sessione():
+    ora = datetime.now().hour
+    return SESSIONE_START <= ora < SESSIONE_END
+
+# Funzioni di calcolo ereditate per mantenere i filtri intatti
 def compute_ema(prices, period):
     if len(prices) < period: return mean(prices) if prices else None
     k = 2 / (period + 1)
@@ -192,11 +208,7 @@ def check_news_block():
     if adesso.hour in [10, 11, 14, 15, 16] and adesso.minute < 15: return True
     return False
 
-# ---------------------------------------------------------
-# 5. MOTORE DI ANALISI MULTI-TIME_FRAME
-# ---------------------------------------------------------
 def analizza(symbol):
-    global saldo_virtuale
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     try:
         r = requests.get(url, params={"interval": "15m", "range": "5d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
@@ -207,7 +219,7 @@ def analizza(symbol):
         for i in range(len(ohlcv["close"])):
             if all(ohlcv[k][i] is not None for k in ["open","high","low","close"]):
                 candles.append({"time": timestamps[i], "open": ohlcv["open"][i], "high": ohlcv["high"][i], "low": ohlcv["low"][i], "close": ohlcv["close"][i]})
-    except: return None, "Errore download dati"
+    except: return None, "Errore download"
 
     if len(candles) < 100: return None, "Dati insufficienti"
     closes = [c["close"] for c in candles]
@@ -239,7 +251,7 @@ def analizza(symbol):
         tp = (price - atr * 2.5) - buffer_val
 
     pip_sl = abs(price - sl) * 10000
-    if pip_sl < SL_MIN_PIP: return None, f"SL troppo stretto ({pip_sl:.1f} pip)"
+    if pip_sl < SL_MIN_PIP: return None, f"SL stretto ({pip_sl:.1f} pip)"
 
     bb_upper, _, bb_lower = compute_bollinger(closes)
     bb_ok = (direction == "LONG" and price <= bb_lower * 1.001) or (direction == "SHORT" and price >= bb_upper * 0.999)
@@ -263,9 +275,6 @@ def analizza(symbol):
         "atr": atr
     }, "OK"
 
-# ---------------------------------------------------------
-# 6. MONITORAGGIO TRADE IN CORSO (Trailing Stop & Break-Even)
-# ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
     if not trade_attivo["aperto"]: return
@@ -292,38 +301,38 @@ def monitora_trade():
         if dir_t == "LONG" and (prezzo - entrata) >= (distanza_tp * 0.5):
             trade_attivo["sl"] = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a `{entrata:.5f}` per azzerare il rischio.")
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop loss protetto.")
         elif dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5):
             trade_attivo["sl"] = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a `{entrata:.5f}` per azzerare il rischio.")
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop loss protetto.")
 
     if dir_t == "LONG":
         nuovo_sl_trailing = prezzo - (atr_corrente * 1.5)
-        if nuovo_sl_trailing > trade_attivo["sl"] and prezzo > entrata:
-            trade_attivo["sl"] = nuovo_sl_trailing
+        if nuovo_sl_trailing > trade_attivo["sl"] and prezzo > entrata: trade_attivo["sl"] = nuovo_sl_trailing
     elif dir_t == "SHORT":
         nuovo_sl_trailing = prezzo + (atr_corrente * 1.5)
-        if nuovo_sl_trailing < trade_attivo["sl"] and prezzo < entrata:
-            trade_attivo["sl"] = nuevo_sl_trailing
+        if nuovo_sl_trailing < trade_attivo["sl"] and prezzo < entrata: trade_attivo["sl"] = nuevo_sl_trailing
 
     if (dir_t == "LONG" and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nPrezzo attuale: `{prezzo:.5f}`\nInserisci il profitto finale in EUR.")
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nInserisci il profitto finalizzato.")
         trade_attivo["in_attesa_risultato"] = True
     elif (dir_t == "LONG" and prezzo <= trade_attivo["sl"]) or (dir_t == "SHORT" and prezzo >= trade_attivo["sl"]):
-        tipo_uscita = "TRAILING STOP / BE" if trade_attivo["be_fatto"] or trade_attivo["sl"] != sl else "STOP LOSS INFORTUNIO"
-        send_telegram(f"🛑 *{tipo_uscita} COLPITO* su {trade_attivo['symbol']}.\nPrezzo di uscita: `{prezzo:.5f}`\nInserisci il bilancio per chiudere.")
+        send_telegram(f"🛑 *STOP LOSS/TRAILING COLPITO* su {trade_attivo['symbol']}.\nInserisci il risultato.")
         trade_attivo["in_attesa_risultato"] = True
 
 # ---------------------------------------------------------
-# 7. EVENTI ORARI & LOOP PRINCIPALE
+# 5. LOOP STRUTTURATO CON SEGNALAZIONI DI STATO OUT-OF-SESSION
 # ---------------------------------------------------------
 def esegui_analisi():
+    if not is_mercato_aperto():
+        return "MERCATO_CHIUSO"
+    if not is_orario_sessione():
+        return "FUORI_ORARIO_SESSIONE"
     if check_news_block():
-        send_telegram("⏳ *FILTRO NEWS ATTIVO*: Sospesa ricerca segnali per alta volatilità attesa.")
-        return
-    ora = datetime.now().hour
-    if not (SESSIONE_START <= ora < SESSIONE_END): return
+        send_telegram("⏳ *FILTRO NEWS ATTIVO*: Sospesa ricerca segnali per alta volatilità.")
+        return "BLOCCO_NEWS"
+        
     for symbol in SYMBOLS:
         signal, motivo = analizza(symbol)
         if signal and signal["score"] in ["A+", "A"]:
@@ -333,8 +342,7 @@ def esegui_analisi():
                 f"Ingresso consigliato: `{signal['price']:.5f}`\n"
                 f"Stop Loss Iniziale: `{signal['sl']:.5f}`\n"
                 f"Take Profit Iniziale: `{signal['tp']:.5f}`\n"
-                f"Fineco Size: *{signal['size']} lotti*\n"
-                f"Rischio: {signal['rischio']:.2f} EUR"
+                f"Fineco Size: *{signal['size']} lotti*"
             )
             send_telegram(msg)
             trade_attivo.update({
@@ -344,47 +352,71 @@ def esegui_analisi():
                 "atr": signal["atr"], "in_attesa_risultato": False
             })
             break
+    return "OK"
 
 def bot_loop():
     global ultimo_controllo_orario
-    send_telegram("🚀 *FOREX ENGINE CLOUD V3 ONLINE* \n_Flask Server prioritario attivato. Protezione Timeout OK._")
+    
+    # Primo feedback immediato all'avvio
+    stato_iniziale_mercato = "APERTO" if is_mercato_aperto() else "CHIUSO (Weekend)"
+    stato_iniziale_sessione = "ATTIVA" if is_orario_sessione() else "DISATTIVA (Fuori orario 9-22)"
+    
+    send_telegram(
+        f"🚀 *FOREX ENGINE CLOUD V3 AVVIATO CORRETTAMENTE*\n"
+        f"-----------------------------------------\n"
+        f"🌍 Stato Mercati: *{stato_iniziale_mercato}*\n"
+        f"⏰ Sessione Operativa: *{stato_iniziale_sessione}*\n"
+        f"🛡️ _Il server Flask è Live. Monitoraggio chat attivo._"
+    )
     invia_report()
     
     while True:
         adesso = datetime.now()
         
-        # MESSAGGIO DI KEEP-ALIVE OGNI ORA
+        # ✅ CONTROL ORARIO AUTOMATICO CON DETTAGLI SULLE SESSIONI CHIUSE
         if adesso.minute == 0 and adesso.hour != ultimo_controllo_orario:
             ultimo_controllo_orario = adesso.hour
             if not trade_attivo["aperto"]:
-                send_telegram(f"🟢 *Bot in funzione h24* - Controllo delle ore {adesso.hour}:00 eseguito. Mercato pattugliato.")
+                if not is_mercato_aperto():
+                    send_telegram(f"💤 *Pattugliamento Ore {adesso.hour}:00* - I mercati Forex sono CHIUSI per il weekend. Nessuna analisi avviata.")
+                elif not is_orario_sessione():
+                    send_telegram(f"⏳ *Pattugliamento Ore {adesso.hour}:00* - Fuori sessione operativa ({SESSIONE_START}:00 - {SESSIONE_END}:00). Algoritmo in modalità stand-by.")
+                else:
+                    send_telegram(f"🟢 *Pattugliamento Ore {adesso.hour}:00* - Sessione attiva. Algoritmo a caccia di segnali...")
 
+        # ✅ LETTURA INTERATTIVA DELLA CHAT (Funziona anche a mercati chiusi!)
         msg_in = leggi_messaggio_telegram()
-        if msg_in and (trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]):
+        if msg_in:
             if not msg_in.startswith("/"):
-                registra_risultato(msg_in)
+                # Se l'utente scrive qualcosa ma non ci sono trade attivi, diamo un feedback immediato coerente
+                if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
+                    registra_risultato(msg_in)
+                else:
+                    # ✅ RISPOSTA INTELLIGENTE SE MANDI UN MESSAGGIO DURANTE IL WEEKEND
+                    if not is_mercato_aperto():
+                        send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\n\nSono online e ti sento! Al momento i mercati Forex sono chiusi per il fine settimana (riaprono domenica alle 23:00). Non ci sono posizioni attive da monitorare. Il tuo saldo attuale è di *{saldo_virtuale:.2f} EUR*.")
+                    else:
+                        send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\n\nAttualmente non ci sono segnali attivi a mercato. Sto scansionando i grafici ogni 5 secondi alla ricerca di configurazioni valide.")
                 continue
         
+        # Gestione dei cicli di attesa dinamici
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
             time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(60)
+            time.sleep(5) # Controllo rapido ogni 5 secondi per rendere la chat reattiva
 
 # ---------------------------------------------------------
-# 8. AVVIO PRIORITARIO DI FLASK PER COMPRENSIONE RENDER
+# 6. ENGINE START
 # ---------------------------------------------------------
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
     t.daemon = True
     
-    # Ritardiamo l'avvio del bot di 5 secondi per far respirare la porta 10000
     def avvio_ritardato():
-        time.sleep(5)
+        time.sleep(2)
         t.start()
         
     Thread(target=avvio_ritardato).start()
-    
-    # Flask parte immediatamente bloccando la porta e superando il controllo di Render
     run_flask()
