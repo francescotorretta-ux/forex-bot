@@ -6,7 +6,9 @@ from statistics import mean, stdev
 from threading import Thread
 from flask import Flask
 
-# 1. SERVER WEB FANTASMA PER TENERE SVEGLIO RENDER H24
+# ---------------------------------------------------------
+# 1. SERVER WEB FANTASMA (Per tenere sveglio Render h24)
+# ---------------------------------------------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -14,7 +16,6 @@ def home():
     return "Forex Bot is Alive and Running!", 200
 
 def run_flask():
-    # Render assegna automaticamente una porta dinamica, noi la leggiamo
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
@@ -26,9 +27,9 @@ try:
 except:
     HAS_MATPLOTLIB = False
 
-# ---------------------------
-# CONFIGURAZIONE STRATEGICA
-# ---------------------------
+# ---------------------------------------------------------
+# 2. CONFIGURAZIONE STRATEGICA
+# ---------------------------------------------------------
 SYMBOLS = ["EURUSD=X", "GBPUSD=X"]
 SALDO_INIZIALE = 100.0
 RISCHIO_BASE   = 0.02
@@ -36,8 +37,7 @@ SESSIONE_START = 9
 SESSIONE_END   = 22
 SL_MIN_PIP     = 10
 TP_MIN_PIP     = 15
-INTERVALLO_MIN = 60
-MONITOR_MIN    = 5
+MONITOR_MIN    = 2        # Monitoraggio più frequente per Trailing Stop
 SPREAD_BUFFER  = 1.5  
 
 TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
@@ -47,17 +47,22 @@ FILE_STORICO     = "storico_saldo.txt"
 saldo_virtuale = 108.10
 stats = {"vinti": 4, "persi": 1, "pareggi": 0, "totali": 5}
 last_update_id = -1
+ultimo_controllo_orario = -1
 
+# Struttura Trade aggiornata per Trailing Stop / Break-Even
 trade_attivo = {
     "aperto": False, "symbol": None, "direction": None, "entrata": None,
-    "sl": None, "tp": None, "be_level": None, "be_fatto": False,
-    "ora_entrata": None, "in_attesa_risultato": False
+    "sl": None, "tp": None, "be_fatto": False, "max_prezzo_raggiunto": None,
+    "min_prezzo_raggiunto": None, "in_attesa_risultato": False
 }
 
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
         f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n")
 
+# ---------------------------------------------------------
+# 3. FUNZIONI TELEGRAM & GRAFICI
+# ---------------------------------------------------------
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -132,13 +137,13 @@ def registra_risultato(testo):
     testo = testo.strip().replace(",", ".")
     try: profit = float(testo)
     except:
-        send_telegram("Formato non riconosciuto. Scrivi es. `+1.50`")
+        send_telegram("⚠️ Formato non riconosciuto. Scrivi es. `+1.50` o `-0.80`")
         return False
     saldo_virtuale += profit
     stats["totali"] += 1
     if profit > 0.02: stats["vinti"] += 1; emoji = "🏆 VINTO"
     elif profit < -0.02: stats["persi"] += 1; emoji = "❌ PERSO"
-    else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO"
+    else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO AL BREAK-EVEN / TRAILING"
     with open(FILE_STORICO, "a") as f: f.write(f"{saldo_virtuale:.2f}\n")
     send_telegram(f"Trade registrato: *{profit:+.2f} EUR* - {emoji}")
     invia_report()
@@ -146,6 +151,9 @@ def registra_risultato(testo):
     trade_attivo["in_attesa_risultato"] = False
     return True
 
+# ---------------------------------------------------------
+# 4. CALCOLI SATELLITARI E INDICATORI (FILTRI)
+# ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period: return mean(prices) if prices else None
     k = 2 / (period + 1)
@@ -183,6 +191,9 @@ def check_news_block():
     if adesso.hour in [10, 11, 14, 15, 16] and adesso.minute < 15: return True
     return False
 
+# ---------------------------------------------------------
+# 5. MOTORE DI ANALISI MULTI-TIME_FRAME
+# ---------------------------------------------------------
 def analizza(symbol):
     global saldo_virtuale
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -247,9 +258,13 @@ def analizza(symbol):
     return {
         "symbol": symbol, "direction": direction, "price": price, "sl": sl, "tp": tp,
         "pip_sl": pip_sl, "pip_tp": abs(price - tp) * 10000, "rr": rr, "size": lotti,
-        "rischio": rischio_eur, "score": score, "rsi": rsi, "trend_4h": "OK" if trend_4h_ok else "NO"
+        "rischio": rischio_eur, "score": score, "rsi": rsi, "trend_4h": "OK" if trend_4h_ok else "NO",
+        "atr": atr
     }, "OK"
 
+# ---------------------------------------------------------
+# 6. MONITORAGGIO TRADE IN CORSO (Trailing Stop & Break-Even)
+# ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
     if not trade_attivo["aperto"]: return
@@ -260,13 +275,53 @@ def monitora_trade():
     except: return
 
     dir_t = trade_attivo["direction"]
-    if (dir_t == "LONG" and prezzo >= trade_attivo["tp"]) or (dir_t == "SHORT" and prezzo <= trade_attivo["tp"]):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nInserisci il profitto in EUR.")
+    entrata = trade_attivo["entrata"]
+    tp = trade_attivo["tp"]
+    sl = trade_attivo["sl"]
+    atr_corrente = trade_attivo.get("atr", 0.0015)
+
+    # Inizializza i picchi di prezzo se vuoti
+    if trade_attivo["max_prezzo_raggiunto"] is None: trade_attivo["max_prezzo_raggiunto"] = prezzo
+    if trade_attivo["min_prezzo_raggiunto"] is None: trade_attivo["min_prezzo_raggiunto"] = prezzo
+
+    # Aggiorna i massimi/minimi toccati dal mercato durante il trade
+    if prezzo > trade_attivo["max_prezzo_raggiunto"]: trade_attivo["max_prezzo_raggiunto"] = prezzo
+    if prezzo < trade_attivo["min_prezzo_raggiunto"]: trade_attivo["min_prezzo_raggiunto"] = prezzo
+
+    # --- LOGICA 1: BREAK-EVEN (Se fa +50% verso il TP, SL va a prezzo d'ingresso) ---
+    distanza_tp = abs(tp - entrata)
+    if not trade_attivo["be_fatto"]:
+        if dir_t == "LONG" and (prezzo - entrata) >= (distanza_tp * 0.5):
+            trade_attivo["sl"] = entrata
+            trade_attivo["be_fatto"] = True
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a prezzo di ingresso (`{entrata:.5f}`) per azzerare il rischio.")
+        elif dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5):
+            trade_attivo["sl"] = entrata
+            trade_attivo["be_fatto"] = True
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a prezzo di ingresso (`{entrata:.5f}`) per azzerare il rischio.")
+
+    # --- LOGICA 2: TRAILING STOP (Insegue il profitto basandosi sull'ATR) ---
+    if dir_t == "LONG":
+        nuovo_sl_trailing = prezzo - (atr_corrente * 1.5)
+        if nuovo_sl_trailing > trade_attivo["sl"] and prezzo > entrata:
+            trade_attivo["sl"] = nuovo_sl_trailing
+    elif dir_t == "SHORT":
+        nuovo_sl_trailing = prezzo + (atr_corrente * 1.5)
+        if nuovo_sl_trailing < trade_attivo["sl"] and prezzo < entrata:
+            trade_attivo["sl"] = nuovo_sl_trailing
+
+    # --- LOGICA 3: CONTROLLO USCITE (Target o Stop modificato) ---
+    if (dir_t == "LONG" and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nPrezzo attuale: `{prezzo:.5f}`\nInserisci il profitto finale in EUR per aggiornare il diario.")
         trade_attivo["in_attesa_risultato"] = True
     elif (dir_t == "LONG" and prezzo <= trade_attivo["sl"]) or (dir_t == "SHORT" and prezzo >= trade_attivo["sl"]):
-        send_telegram(f"🛑 *STOP LOSS COLPITO* su {trade_attivo['symbol']}.\nInserisci la perdita.")
+        tipo_uscita = "TRAILING STOP / BE" if trade_attivo["be_fatto"] or trade_attivo["sl"] != sl else "STOP LOSS INFORTUNIO"
+        send_telegram(f"🛑 *{tipo_uscita} COLPITO* su {trade_attivo['symbol']}.\nPrezzo di uscita: `{prezzo:.5f}`\nInserisci il bilancio (es. `0.00` o la perdita) per chiudere.")
         trade_attivo["in_attesa_risultato"] = True
 
+# ---------------------------------------------------------
+# 7. EVENTI ORARI & LOOP PRINCIPALE
+# ---------------------------------------------------------
 def esegui_analisi():
     if check_news_block():
         send_telegram("⏳ *FILTRO NEWS ATTIVO*: Sospesa ricerca segnali per alta volatilità attesa.")
@@ -280,35 +335,52 @@ def esegui_analisi():
                 f"💎 *SEGNALE {signal['score']} DISPONIBILE*\n"
                 f"Asset: *{symbol}* | Direzione: *{signal['direction']}*\n"
                 f"Ingresso consigliato: `{signal['price']:.5f}`\n"
-                f"Stop Loss (Bufferizzato): `{signal['sl']:.5f}`\n"
-                f"Take Profit (Bufferizzato): `{signal['tp']:.5f}`\n"
-                f"Size consigliata Fineco: *{signal['size']} lotti*\n"
-                f"Rischio stimato: {signal['rischio']:.2f} EUR"
+                f"Stop Loss Iniziale: `{signal['sl']:.5f}`\n"
+                f"Take Profit Iniziale: `{signal['tp']:.5f}`\n"
+                f"Fineco Size: *{signal['size']} lotti*\n"
+                f"Rischio: {signal['rischio']:.2f} EUR\n"
+                f"🛡️ _Filtro Break-Even e Trailing Stop automatici attivati su questo trade._"
             )
             send_telegram(msg)
-            trade_attivo.update({"aperto": True, "symbol": symbol, "direction": signal["direction"], "entrata": signal["price"], "sl": signal["sl"], "tp": signal["tp"], "in_attesa_risultato": False})
+            trade_attivo.update({
+                "aperto": True, "symbol": symbol, "direction": signal["direction"], 
+                "entrata": signal["price"], "sl": signal["sl"], "tp": signal["tp"], 
+                "be_fatto": False, "max_prezzo_raggiunto": signal["price"], "min_prezzo_raggiunto": signal["price"],
+                "atr": signal["atr"], "in_attesa_risultato": False
+            })
             break
 
 def bot_loop():
-    send_telegram("🚀 *FOREX ENGINE V3 ATTIVO SU RENDER CLOUD*")
+    global ultimo_controllo_orario
+    send_telegram("🚀 *FOREX ENGINE CLOUD V3 ONLINE* \n_Flask Server attivo | Filtri, Trailing Stop e Messaggio orario OK._")
     invia_report()
+    
     while True:
+        adesso = datetime.now()
+        
+        # ✅ MESSAGGIO "SONO VIVO" OGNI ORA SPACCATA (Solo se non ci sono trade in corso per non spammare)
+        if adesso.minute == 0 and adesso.hour != ultimo_controllo_orario:
+            ultimo_controllo_orario = adesso.hour
+            if not trade_attivo["aperto"]:
+                send_telegram(f"🟢 *Bot in funzione h24* - Controllo orario eseguito alle {adesso.hour}:00. Mercato pattugliato con successo.")
+
+        # Gestione interazione Telegram
         msg_in = leggi_messaggio_telegram()
         if msg_in and (trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]):
             if not msg_in.startswith("/"):
                 registra_risultato(msg_in)
                 continue
+        
+        # Scelta del ciclo di attesa (frequente per i trade, orario per l'analisi dei segnali)
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
             time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(INTERVALLO_MIN * 60)
+            time.sleep(60) # Controlla i mercati ogni minuto per precisione oraria ed eventi chat
 
 if __name__ == "__main__":
-    # Avvia il bot vero e proprio in un thread separato in background
     t = Thread(target=bot_loop)
     t.daemon = True
     t.start()
-    # Avvia Flask sulla porta principale per rispondere a Render
     run_flask()
