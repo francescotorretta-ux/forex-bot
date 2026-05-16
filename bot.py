@@ -7,7 +7,7 @@ from threading import Thread
 from flask import Flask
 
 # ---------------------------------------------------------
-# 1. SERVER WEB FANTASMA (Per tenere sveglio Render h24)
+# 1. SERVER WEB FANTASMA (In cima per rispondere subito a Render)
 # ---------------------------------------------------------
 app = Flask(__name__)
 
@@ -37,28 +37,29 @@ SESSIONE_START = 9
 SESSIONE_END   = 22
 SL_MIN_PIP     = 10
 TP_MIN_PIP     = 15
-MONITOR_MIN    = 2        # Monitoraggio più frequente per Trailing Stop
+MONITOR_MIN    = 2        
 SPREAD_BUFFER  = 1.5  
 
 TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
 FILE_STORICO     = "storico_saldo.txt"
 
-saldo_virtuale = 108.10
-stats = {"vinti": 4, "persi": 1, "pareggi": 0, "totali": 5}
+# AGGIORNAMENTO AGGIUNTI I 3 TRADE PERSI (-0.08, -0.37, -1.02)
+saldo_virtuale = 106.63  
+stats = {"vinti": 4, "persi": 4, "pareggi": 0, "totali": 8}
 last_update_id = -1
 ultimo_controllo_orario = -1
 
-# Struttura Trade aggiornata per Trailing Stop / Break-Even
 trade_attivo = {
     "aperto": False, "symbol": None, "direction": None, "entrata": None,
     "sl": None, "tp": None, "be_fatto": False, "max_prezzo_raggiunto": None,
     "min_prezzo_raggiunto": None, "in_attesa_risultato": False
 }
 
+# Storico aggiornato con la progressione delle nuove perdite
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
-        f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n")
+        f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n108.02\n107.65\n106.63\n")
 
 # ---------------------------------------------------------
 # 3. FUNZIONI TELEGRAM & GRAFICI
@@ -143,7 +144,7 @@ def registra_risultato(testo):
     stats["totali"] += 1
     if profit > 0.02: stats["vinti"] += 1; emoji = "🏆 VINTO"
     elif profit < -0.02: stats["persi"] += 1; emoji = "❌ PERSO"
-    else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO AL BREAK-EVEN / TRAILING"
+    else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO"
     with open(FILE_STORICO, "a") as f: f.write(f"{saldo_virtuale:.2f}\n")
     send_telegram(f"Trade registrato: *{profit:+.2f} EUR* - {emoji}")
     invia_report()
@@ -280,27 +281,23 @@ def monitora_trade():
     sl = trade_attivo["sl"]
     atr_corrente = trade_attivo.get("atr", 0.0015)
 
-    # Inizializza i picchi di prezzo se vuoti
     if trade_attivo["max_prezzo_raggiunto"] is None: trade_attivo["max_prezzo_raggiunto"] = prezzo
     if trade_attivo["min_prezzo_raggiunto"] is None: trade_attivo["min_prezzo_raggiunto"] = prezzo
 
-    # Aggiorna i massimi/minimi toccati dal mercato durante il trade
     if prezzo > trade_attivo["max_prezzo_raggiunto"]: trade_attivo["max_prezzo_raggiunto"] = prezzo
     if prezzo < trade_attivo["min_prezzo_raggiunto"]: trade_attivo["min_prezzo_raggiunto"] = prezzo
 
-    # --- LOGICA 1: BREAK-EVEN (Se fa +50% verso il TP, SL va a prezzo d'ingresso) ---
     distanza_tp = abs(tp - entrata)
     if not trade_attivo["be_fatto"]:
         if dir_t == "LONG" and (prezzo - entrata) >= (distanza_tp * 0.5):
             trade_attivo["sl"] = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a prezzo di ingresso (`{entrata:.5f}`) per azzerare il rischio.")
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a `{entrata:.5f}` per azzerare il rischio.")
         elif dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5):
             trade_attivo["sl"] = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a prezzo di ingresso (`{entrata:.5f}`) per azzerare il rischio.")
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}. Stop Loss spostato a `{entrata:.5f}` per azzerare il rischio.")
 
-    # --- LOGICA 2: TRAILING STOP (Insegue il profitto basandosi sull'ATR) ---
     if dir_t == "LONG":
         nuovo_sl_trailing = prezzo - (atr_corrente * 1.5)
         if nuovo_sl_trailing > trade_attivo["sl"] and prezzo > entrata:
@@ -308,15 +305,14 @@ def monitora_trade():
     elif dir_t == "SHORT":
         nuovo_sl_trailing = prezzo + (atr_corrente * 1.5)
         if nuovo_sl_trailing < trade_attivo["sl"] and prezzo < entrata:
-            trade_attivo["sl"] = nuovo_sl_trailing
+            trade_attivo["sl"] = nuevo_sl_trailing
 
-    # --- LOGICA 3: CONTROLLO USCITE (Target o Stop modificato) ---
     if (dir_t == "LONG" and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nPrezzo attuale: `{prezzo:.5f}`\nInserisci il profitto finale in EUR per aggiornare il diario.")
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}!\nPrezzo attuale: `{prezzo:.5f}`\nInserisci il profitto finale in EUR.")
         trade_attivo["in_attesa_risultato"] = True
     elif (dir_t == "LONG" and prezzo <= trade_attivo["sl"]) or (dir_t == "SHORT" and prezzo >= trade_attivo["sl"]):
         tipo_uscita = "TRAILING STOP / BE" if trade_attivo["be_fatto"] or trade_attivo["sl"] != sl else "STOP LOSS INFORTUNIO"
-        send_telegram(f"🛑 *{tipo_uscita} COLPITO* su {trade_attivo['symbol']}.\nPrezzo di uscita: `{prezzo:.5f}`\nInserisci il bilancio (es. `0.00` o la perdita) per chiudere.")
+        send_telegram(f"🛑 *{tipo_uscita} COLPITO* su {trade_attivo['symbol']}.\nPrezzo di uscita: `{prezzo:.5f}`\nInserisci il bilancio per chiudere.")
         trade_attivo["in_attesa_risultato"] = True
 
 # ---------------------------------------------------------
@@ -338,8 +334,7 @@ def esegui_analisi():
                 f"Stop Loss Iniziale: `{signal['sl']:.5f}`\n"
                 f"Take Profit Iniziale: `{signal['tp']:.5f}`\n"
                 f"Fineco Size: *{signal['size']} lotti*\n"
-                f"Rischio: {signal['rischio']:.2f} EUR\n"
-                f"🛡️ _Filtro Break-Even e Trailing Stop automatici attivati su questo trade._"
+                f"Rischio: {signal['rischio']:.2f} EUR"
             )
             send_telegram(msg)
             trade_attivo.update({
@@ -352,35 +347,44 @@ def esegui_analisi():
 
 def bot_loop():
     global ultimo_controllo_orario
-    send_telegram("🚀 *FOREX ENGINE CLOUD V3 ONLINE* \n_Flask Server attivo | Filtri, Trailing Stop e Messaggio orario OK._")
+    send_telegram("🚀 *FOREX ENGINE CLOUD V3 ONLINE* \n_Flask Server prioritario attivato. Protezione Timeout OK._")
     invia_report()
     
     while True:
         adesso = datetime.now()
         
-        # ✅ MESSAGGIO "SONO VIVO" OGNI ORA SPACCATA (Solo se non ci sono trade in corso per non spammare)
+        # MESSAGGIO DI KEEP-ALIVE OGNI ORA
         if adesso.minute == 0 and adesso.hour != ultimo_controllo_orario:
             ultimo_controllo_orario = adesso.hour
             if not trade_attivo["aperto"]:
-                send_telegram(f"🟢 *Bot in funzione h24* - Controllo orario eseguito alle {adesso.hour}:00. Mercato pattugliato con successo.")
+                send_telegram(f"🟢 *Bot in funzione h24* - Controllo delle ore {adesso.hour}:00 eseguito. Mercato pattugliato.")
 
-        # Gestione interazione Telegram
         msg_in = leggi_messaggio_telegram()
         if msg_in and (trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]):
             if not msg_in.startswith("/"):
                 registra_risultato(msg_in)
                 continue
         
-        # Scelta del ciclo di attesa (frequente per i trade, orario per l'analisi dei segnali)
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
             time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(60) # Controlla i mercati ogni minuto per precisione oraria ed eventi chat
+            time.sleep(60)
 
+# ---------------------------------------------------------
+# 8. AVVIO PRIORITARIO DI FLASK PER COMPRENSIONE RENDER
+# ---------------------------------------------------------
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
     t.daemon = True
-    t.start()
+    
+    # Ritardiamo l'avvio del bot di 5 secondi per far respirare la porta 10000
+    def avvio_ritardato():
+        time.sleep(5)
+        t.start()
+        
+    Thread(target=avvio_ritardato).start()
+    
+    # Flask parte immediatamente bloccando la porta e superando il controllo di Render
     run_flask()
