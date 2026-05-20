@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Forex Bot Core v3.2 Pro Active!", 200
+    return "Forex Bot Core v3.3 Pro Safe-Entry Active!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -39,18 +39,18 @@ SL_MIN_PIP     = 10
 TP_MIN_PIP     = 15
 MONITOR_MIN    = 2        
 SPREAD_BUFFER  = 1.5  
-SOGLIA_APPROVAZIONE = 8  # Alzata a 8 per evitare ingressi spazzatura
+SOGLIA_APPROVAZIONE = 8  
 
 TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
 FILE_STORICO     = "storico_saldo.txt"
 
-saldo_virtuale = 106.63  
-stats = {"vinti": 4, "persi": 4, "pareggi": 0, "totali": 8}
+# ✅ AGGIORNAMENTO STATISTICHE: Inserito il 9° trade (-0.90 EUR)
+saldo_virtuale = 105.73  
+stats = {"vinti": 4, "persi": 5, "pareggi": 0, "totali": 9}
 last_update_id = -1
 ultimo_heartbeat_orario = -1
 
-# Memoria volatili degli indicatori per ottimizzazione MACD
 macd_memoria = {}
 
 trade_attivo = {
@@ -59,9 +59,15 @@ trade_attivo = {
     "min_prezzo_raggiunto": None, "in_attesa_risultato": False
 }
 
+# Struttura di memoria per la gestione della conferma manuale
+segnale_in_attesa = {
+    "attivo": False, "timestamp_generazione": None, "data_trade": None
+}
+
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
-        f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n108.02\n107.65\n106.63\n")
+        # Aggiornata la stringa storica includendo il nuovo saldo finale a 105.73
+        f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n108.02\n107.65\n106.63\n105.73\n")
 
 # ---------------------------------------------------------
 # 3. FUNZIONI TELEGRAM & GRAFICI
@@ -148,7 +154,7 @@ def registra_risultato(testo):
     elif profit < -0.02: stats["persi"] += 1; emoji = "❌ PERSO"
     else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO"
     with open(FILE_STORICO, "a") as f: f.write(f"{saldo_virtuale:.2f}\n")
-    send_telegram(f"Trade registered: *{profit:+.2f} EUR* - {emoji}")
+    send_telegram(f"Trade registrato: *{profit:+.2f} EUR* - {emoji}")
     invia_report()
     trade_attivo["aperto"] = False
     trade_attivo["in_attesa_risultato"] = False
@@ -170,7 +176,7 @@ def is_orario_sessione():
     return SESSIONE_START <= ora < SESSIONE_END
 
 # ---------------------------------------------------------
-# 5. CALCOLO INDICATORI (Ottimizzati e ultra-leggeri)
+# 5. CALCOLO INDICATORI (Ottimizzati)
 # ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period: return mean(prices) if prices else None
@@ -180,24 +186,17 @@ def compute_ema(prices, period):
     return ema
 
 def compute_macd_veloce(closes, symbol, fast_period=12, slow_period=26, signal_period=9):
-    """ ✅ FIX: Calcolo matematico ottimizzato senza loop storici infiniti (Anti-Timeout) """
     if len(closes) < slow_period: return 0, 0, 0
-    
     fast_ema = compute_ema(closes, fast_period)
     slow_ema = compute_ema(closes, slow_period)
     macd_line = fast_ema - slow_ema
-    
-    # Memorizzazione dinamica per la Signal Line (EMA del MACD)
     if symbol not in macd_memoria:
         macd_memoria[symbol] = []
-    
     macd_memoria[symbol].append(macd_line)
     if len(macd_memoria[symbol]) > 50:
         macd_memoria[symbol].pop(0)
-        
     signal_line = compute_ema(macd_memoria[symbol], signal_period)
     if signal_line is None: signal_line = macd_line
-    
     return macd_line, signal_line, (macd_line - signal_line)
 
 def compute_atr(candles, period=14):
@@ -248,7 +247,7 @@ def check_news_block():
     return False
 
 # ---------------------------------------------------------
-# 6. MOTORE DI PUNTI E VALUTAZIONE SOGLIE
+# 6. MOTORE DI CALCOLO MATRICE
 # ---------------------------------------------------------
 def calcola_matrice_asset(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -285,13 +284,11 @@ def calcola_matrice_asset(symbol):
     if dir_base == "NESSUNO":
         return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "Trend M15/H1 disallineato"}
 
-    # ✅ CORREZIONE STRATEGICA: Il Trend H4 diventa vincolo bloccante (Se fallisce, punti azzerati)
     h4_ok = (dir_base == "LONG" and price > ema20_4h) or (dir_base == "SHORT" and price < ema20_4h)
     if not h4_ok:
         return {"symbol": symbol, "punti": 0, "direzione": dir_base, "price": price, "msg": "❌ Bloccato: Contro Trend H4"}
 
-    punti = 2  # Assegnati i 2 punti base per la conferma H4 superata
-    
+    punti = 2  
     p_bb = 2 if ((dir_base == "LONG" and price <= bb_lower * 1.001) or (dir_base == "SHORT" and price >= bb_upper * 0.999)) else 0
     p_rsi = 1 if (40 < rsi < 60) else 0
     p_macd = 2 if ((dir_base == "LONG" and macd_hist > 0) or (dir_base == "SHORT" and macd_hist < 0)) else 0
@@ -314,8 +311,10 @@ def calcola_matrice_asset(symbol):
 
 def genera_report_ispettivo():
     report = "🔍 *TELEMETRIA INTEGRALE FILTRI*\n-------------------------\n"
-    if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]:
-        report += "⚠️ *Stato*: Ricerca sospesa (Trade in corso)\n-------------------------\n"
+    if segnale_in_attesa["attivo"]:
+        report += "⏳ *Stato*: In attesa di conferma entrata manuale dell'utente...\n-------------------------\n"
+    elif trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]:
+        report += "⚠️ *Stato*: Ricerca sospesa (Trade a mercato)\n-------------------------\n"
     for symbol in SYMBOLS:
         res = calcola_matrice_asset(symbol)
         if res:
@@ -325,7 +324,7 @@ def genera_report_ispettivo():
     return report
 
 # ---------------------------------------------------------
-# 7. LOGICA CORE DI TRADING
+# 7. LOGICA CORE DI MONITORAGGIO
 # ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
@@ -357,15 +356,16 @@ def monitora_trade():
 
     tolleranza = 0.00005 
     if (dir_t == "LONG" and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Digita il profitto.")
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Digita il profitto netto.")
         trade_attivo["in_attesa_risultato"] = True
     elif (dir_t == "LONG" and prezzo <= (sl - tolleranza)) or (dir_t == "SHORT" and prezzo >= (sl + tolleranza)):
-        send_telegram(f"🛑 *STOP LOSS COLPITO* su {trade_attivo['symbol']}! Digita l'esito finale numerico.")
+        send_telegram(f"🛑 *STOP LOSS COLPITO* su {trade_attivo['symbol']}! Digita l'esito numerico.")
         trade_attivo["in_attesa_risultato"] = True
 
 def esegui_analisi():
+    global segnale_in_attesa
     if not is_mercato_aperto() or not is_orario_sessione() or check_news_block(): return
-    if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]: return
+    if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"] or segnale_in_attesa["attivo"]: return
     
     for symbol in SYMBOLS:
         res = calcola_matrice_asset(symbol)
@@ -373,49 +373,54 @@ def esegui_analisi():
             rischio_eur = saldo_virtuale * RISCHIO_BASE * (1.0 if res["punti"] >= 9 else 0.75)
             lotti = round(max((rischio_eur / (res["pip_sl"] * 0.09)) * 0.01, 0.01), 2)
             
+            # ✅ MODIFICA SAFE-ENTRY: Il segnale richiede la conferma esplicita
             msg = (
-                f"💎 *SEGNALE PRO {res['score']} APPROVATO*\n"
-                f"Asset: *{symbol}* | Tendenza: *{res['direzione']}*\n"
-                f"Matrice Punti: `{res['punti']}/11` 🏆\n"
-                f"Ingresso: `{res['price']:.5f}`\n"
-                f"Stop Loss: `{res['sl']:.5f}`\n"
-                f"Take Profit: `{res['tp']:.5f}`\n"
-                f"Volume Fineco: *{lotti} lotti*"
+                f"⚠️ *SEGNALE GENERATO - IN ATTESA DI CONFERMA OPERATIVA*\n"
+                f"Asset: *{symbol}* | Tendenza: *{res['direzione']}* ({res['punti']}/11 Punti)\n"
+                f"Ingresso consigliato: `{res['price']:.5f}`\n"
+                f"Stop Loss: `{res['sl']:.5f}` | Take Profit: `{res['tp']:.5f}`\n"
+                f"Volume Fineco: *{lotti} lotti*\n\n"
+                f"👉 Scrivi *'Entrato'* (o 'ok') entro 5 minuti per confermare l'apertura su Fineco, altrimenti il segnale scadrà."
             )
             send_telegram(msg)
-            trade_attivo.update({
-                "aperto": True, "symbol": symbol, "direction": res["direzione"], 
-                "entrata": res["price"], "sl": res["sl"], "tp": res["tp"], 
-                "be_fatto": False, "max_prezzo_raggiunto": res["price"], "min_prezzo_raggiunto": res["price"],
-                "atr": res["atr"], "in_attesa_risultato": False
+            
+            # Salviamo il pacchetto dati temporaneamente
+            segnale_in_attesa.update({
+                "attivo": True,
+                "timestamp_generazione": time.time(),
+                "data_trade": {
+                    "symbol": symbol, "direction": res["direzione"], "entrata": res["price"],
+                    "sl": res["sl"], "tp": res["tp"], "atr": res["atr"]
+                }
             })
             break
 
 # ---------------------------------------------------------
-# 8. LOOP OPERATIVO CON HEARTBEAT ORARIO AUTOMATICO
+# 8. LOOP OPERATIVO PRINCIPALE CON GESTIONE TIMEOUT CONFERMA
 # ---------------------------------------------------------
 def bot_loop():
-    global ultimo_heartbeat_orario
-    send_telegram("🚀 *CORE ENGINE V3.2 PRO ATTIVATO*\n- Soglia minima inserita a >= 8 punti\n- Filtro H4 bloccante attivo\n- Ottimizzazione MACD anti-timeout completata\n- Sistema Heartbeat orario attivo 🟢")
+    global ultimo_heartbeat_orario, segnale_in_attesa, trade_attivo
+    send_telegram("🚀 *CORE V3.3 PRO - SAFE-ENTRY ATTIVATO*\n- Statistiche allineate (9 Trade totali | Saldo: 105.73 EUR)\n- Sistema di richiesta conferma ingresso attivo 🛡️")
     invia_report()
     
     while True:
-        adesso = datetime.now()
+        adesso_dt = datetime.now()
         
-        # ✅ FIX: Heartbeat automatico allo scoccare di ogni ora (Nessun messaggio vuoto)
-        if adesso.minute == 0 and adesso.hour != ultimo_heartbeat_orario:
-            ultimo_heartbeat_orario = adesso.hour
-            status_msg = f"⏱️ *HEARTBEAT ORARIO AUTOMATICO - ORE {adesso.hour}:00*\n"
-            if not is_mercato_aperto():
-                status_msg += "Status: *Stand-by* 💤 (Mercati Chiusi)"
-                send_telegram(status_msg)
-            elif not is_orario_sessione():
-                status_msg += "Status: *Riposo* ⏳ (Fuori orario sessione 9-22)"
-                send_telegram(status_msg)
+        # Gestione Scadenza Segnale (Timeout 5 minuti = 300 secondi)
+        if segnale_in_attesa["attivo"]:
+            if time.time() - segnale_in_attesa["timestamp_generazione"] > 300:
+                send_telegram(f"❌ *SEGNALE SCADUTO*: Nessuna conferma ricevuta per {segnale_in_attesa['data_trade']['symbol']}. Ricerca ripresa.")
+                segnale_in_attesa["attivo"] = False
+        
+        # Heartbeat Orario Automatico
+        if adesso_dt.minute == 0 and adesso_dt.hour != ultimo_heartbeat_orario:
+            ultimo_heartbeat_orario = adesso_dt.hour
+            status_msg = f"⏱️ *HEARTBEAT ORARIO AUTOMATICO - ORE {adesso_dt.hour}:00*\n"
+            if not is_mercato_aperto(): status_msg += "Status: *Stand-by* 💤 (Mercati Chiusi)"
+            elif not is_orario_sessione(): status_msg += "Status: *Riposo* ⏳ (Fuori Sessione)"
             else:
                 status_msg += "Status: *Scansione Attiva* 🟢\n"
                 send_telegram(status_msg)
-                # Invia contestualmente la telemetria dei filtri per controllo visivo automatico
                 send_telegram(genera_report_ispettivo())
 
         msg_in = leggi_messaggio_telegram()
@@ -424,12 +429,25 @@ def bot_loop():
             if parola in ["filtri", "stato", "telemetria", "test"]:
                 send_telegram(genera_report_ispettivo())
                 continue
+            
+            # ✅ GESTIONE CONFERMA SEGNALE IN ATTESA
+            if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
+                dt = segnale_in_attesa["data_trade"]
+                trade_attivo.update({
+                    "aperto": True, "symbol": dt["symbol"], "direction": dt["direction"],
+                    "entrata": dt["entrata"], "sl": dt["sl"], "tp": dt["tp"],
+                    "be_fatto": False, "max_prezzo_raggiunto": dt["entrata"], "min_prezzo_raggiunto": dt["entrata"],
+                    "atr": dt["atr"], "in_attesa_risultato": False
+                })
+                segnale_in_attesa["attivo"] = False
+                send_telegram(f"🚀 *Ricevuto!* Trade su {dt['symbol']} attivato nel sistema di monitoraggio. Buona fortuna!")
+                continue
                 
             if not msg_in.startswith("/"):
                 if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
                     registra_risultato(msg_in)
                 else:
-                    send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\nNessun trade aperto. Scrivi 'Filtri' per ispezionare.")
+                    send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\nNessun trade da bilanciare. Scrivi 'Filtri' per lo stato.")
                 continue
         
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
