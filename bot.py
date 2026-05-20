@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Forex Bot Telemetry Engine is Active!", 200
+    return "Forex Bot Core v3.2 Pro Active!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -28,7 +28,7 @@ except:
     HAS_MATPLOTLIB = False
 
 # ---------------------------------------------------------
-# 2. CONFIGURAZIONE STRATEGICA
+# 2. CONFIGURAZIONE STRATEGICA AVANZATA
 # ---------------------------------------------------------
 SYMBOLS = ["EURUSD=X", "GBPUSD=X"]
 SALDO_INIZIALE = 100.0
@@ -39,6 +39,7 @@ SL_MIN_PIP     = 10
 TP_MIN_PIP     = 15
 MONITOR_MIN    = 2        
 SPREAD_BUFFER  = 1.5  
+SOGLIA_APPROVAZIONE = 8  # Alzata a 8 per evitare ingressi spazzatura
 
 TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
@@ -47,7 +48,10 @@ FILE_STORICO     = "storico_saldo.txt"
 saldo_virtuale = 106.63  
 stats = {"vinti": 4, "persi": 4, "pareggi": 0, "totali": 8}
 last_update_id = -1
-ultimo_controllo_orario = -1
+ultimo_heartbeat_orario = -1
+
+# Memoria volatili degli indicatori per ottimizzazione MACD
+macd_memoria = {}
 
 trade_attivo = {
     "aperto": False, "symbol": None, "direction": None, "entrata": None,
@@ -144,14 +148,14 @@ def registra_risultato(testo):
     elif profit < -0.02: stats["persi"] += 1; emoji = "❌ PERSO"
     else: stats["pareggi"] += 1; emoji = "🛡️ PAREGGIO"
     with open(FILE_STORICO, "a") as f: f.write(f"{saldo_virtuale:.2f}\n")
-    send_telegram(f"Trade registrato: *{profit:+.2f} EUR* - {emoji}")
+    send_telegram(f"Trade registered: *{profit:+.2f} EUR* - {emoji}")
     invia_report()
     trade_attivo["aperto"] = False
     trade_attivo["in_attesa_risultato"] = False
     return True
 
 # ---------------------------------------------------------
-# 4. CONTROLLI ORARI
+# 4. CONTROLLI OPERATIVI
 # ---------------------------------------------------------
 def is_mercato_aperto():
     giorno_settimana = datetime.now().weekday() 
@@ -166,7 +170,7 @@ def is_orario_sessione():
     return SESSIONE_START <= ora < SESSIONE_END
 
 # ---------------------------------------------------------
-# 5. INDICATORI TECNICI
+# 5. CALCOLO INDICATORI (Ottimizzati e ultra-leggeri)
 # ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period: return mean(prices) if prices else None
@@ -175,16 +179,26 @@ def compute_ema(prices, period):
     for price in prices[period:]: ema = (price * k) + (ema * (1 - k))
     return ema
 
-def compute_macd(closes, fast_period=12, slow_period=26, signal_period=9):
-    if len(closes) < slow_period + signal_period: return 0, 0, 0
-    macd_line = []
-    for i in range(slow_period, len(closes) + 1):
-        sub_closes = closes[:i]
-        fast_ema = compute_ema(sub_closes, fast_period)
-        slow_ema = compute_ema(sub_closes, slow_period)
-        macd_line.append(fast_ema - slow_ema)
-    signal_line = compute_ema(macd_line, signal_period)
-    return macd_line[-1], signal_line, macd_line[-1] - signal_line
+def compute_macd_veloce(closes, symbol, fast_period=12, slow_period=26, signal_period=9):
+    """ ✅ FIX: Calcolo matematico ottimizzato senza loop storici infiniti (Anti-Timeout) """
+    if len(closes) < slow_period: return 0, 0, 0
+    
+    fast_ema = compute_ema(closes, fast_period)
+    slow_ema = compute_ema(closes, slow_period)
+    macd_line = fast_ema - slow_ema
+    
+    # Memorizzazione dinamica per la Signal Line (EMA del MACD)
+    if symbol not in macd_memoria:
+        macd_memoria[symbol] = []
+    
+    macd_memoria[symbol].append(macd_line)
+    if len(macd_memoria[symbol]) > 50:
+        macd_memoria[symbol].pop(0)
+        
+    signal_line = compute_ema(macd_memoria[symbol], signal_period)
+    if signal_line is None: signal_line = macd_line
+    
+    return macd_line, signal_line, (macd_line - signal_line)
 
 def compute_atr(candles, period=14):
     if len(candles) < period + 1: return None
@@ -234,149 +248,90 @@ def check_news_block():
     return False
 
 # ---------------------------------------------------------
-# 6. MOTORE DI TELEMETRIA (Ispezione dei Filtri Bloor)
+# 6. MOTORE DI PUNTI E VALUTAZIONE SOGLIE
 # ---------------------------------------------------------
-def genera_report_ispettivo():
-    """ Analizza i mercati e sputa fuori l'esatta telemetria dei punti """
-    report = "🔍 *TELEMETRIA FILTRI IN TEMPO REALE*\n-------------------------\n"
-    for symbol in SYMBOLS:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        try:
-            r = requests.get(url, params={"interval": "15m", "range": "5d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
-            result = r["chart"]["result"][0]
-            closes = [x for x in result["indicators"]["quote"][0]["close"] if x is not None]
-            ohlcv = result["indicators"]["quote"][0]
-            timestamps = result["timestamp"]
-            candles = []
-            for i in range(len(ohlcv["close"])):
-                if all(ohlcv[k][i] is not None for k in ["open","high","low","close"]):
-                    candles.append({"time": timestamps[i], "open": ohlcv["open"][i], "high": ohlcv["high"][i], "low": ohlcv["low"][i], "close": ohlcv["close"][i]})
-            
-            price = closes[-1]
-            ema50_15m = compute_ema(closes, 50)
-            rsi = compute_rsi(closes)
-            bb_upper, _, bb_lower = compute_bollinger(closes)
-            _, _, macd_hist = compute_macd(closes)
-            res_max, sup_min = get_support_resistance(candles)
-            pattern = detect_candle_pattern(candles)
-            atr = compute_atr(candles)
-
-            r_1h = requests.get(url, params={"interval": "1h", "range": "15d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
-            closes_1h = [x for x in r_1h["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
-            ema50_1h = compute_ema(closes_1h, 50)
-            ema20_4h = compute_ema(closes_1h, 80)
-
-            # Direzione base
-            dir_base = "NESSUNO"
-            if price > ema50_15m and price > ema50_1h: dir_base = "LONG"
-            elif price < ema50_15m and price < ema50_1h: dir_base = "SHORT"
-
-            report += f"💱 *Asset: {symbol}* (Prezzo: `{price:.5f}`)\n"
-            report += f"🔀 Allineamento M15/H1: " + (f"✅ *{dir_base}*\n" if dir_base != "NESSUNO" else "❌ NO (Trend opposti)\n")
-            
-            if dir_base == "NESSUNO":
-                report += "⚠️ _Impossibile calcolare la matrice senza trend._\n\n"
-                continue
-
-            # Calcolo analitico punti
-            p_h4 = 2 if ((dir_base == "LONG" and price > ema20_4h) or (dir_base == "SHORT" and price < ema20_4h)) else 0
-            p_bb = 2 if ((dir_base == "LONG" and price <= bb_lower * 1.001) or (dir_base == "SHORT" and price >= bb_upper * 0.999)) else 0
-            p_rsi = 1 if (40 < rsi < 60) else 0
-            p_macd = 2 if ((dir_base == "LONG" and macd_hist > 0) or (dir_base == "SHORT" and macd_hist < 0)) else 0
-            proximity = (atr * 0.5) if atr else 0.001
-            p_sr = 2 if ((dir_base == "LONG" and abs(price - sup_min) <= proximity) or (dir_base == "SHORT" and abs(price - res_max) <= proximity)) else 0
-            p_pat = 2 if ((dir_base == "LONG" and pattern == "HAMMER") or (dir_base == "SHORT" and pattern == "SHOOTING_STAR")) else 0
-            
-            totale = p_h4 + p_bb + p_rsi + p_macd + p_sr + p_pat
-
-            report += f"• Filtro Trend H4: " + (f"✅ (+2)" if p_h4 else "❌ (0)") + "\n"
-            report += f"• Volatilità Bollinger: " + (f"✅ (+2)" if p_bb else "❌ (0)") + "\n"
-            report += f"• Momento RSI (40-60): " + (f"✅ (+1)" if p_rsi else f"❌ (0) [RSI: {rsi:.1f}]") + "\n"
-            report += f"• Istogramma MACD: " + (f"✅ (+2)" if p_macd else "❌ (0)") + "\n"
-            report += f"• Area S/R Storica: " + (f"✅ (+2)" if p_sr else "❌ (0)") + "\n"
-            report += f"• Struttura Candela: " + (f"✅ (+2) [{pattern}]" if p_pat else f"❌ (0) [No Pattern]") + "\n"
-            report += f"📊 *PUNTEGGIATURA TOTALE: {totale}/11*\n"
-            report += f"⚖️ Esito: " + ("🚀 SEGNALE APPROVATO" if totale >= 6 else "⏳ BLOCCATO (Sotto soglia 6)") + "\n\n"
-        except Exception as e:
-            report += f"💱 *Asset: {symbol}* -> Errore lettura dati ({str(e)})\n\n"
-    return report
-
-# ---------------------------------------------------------
-# 7. FUNZIONE PRINCIPALE DI ANALISI
-# ---------------------------------------------------------
-def analizza(symbol):
+def calcola_matrice_asset(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     try:
-        r = requests.get(url, params={"interval": "15m", "range": "5d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
+        r = requests.get(url, params={"interval": "15m", "range": "5d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
         result = r["chart"]["result"][0]
         closes = [x for x in result["indicators"]["quote"][0]["close"] if x is not None]
         ohlcv = result["indicators"]["quote"][0]
-        timestamps = result["timestamp"]
         candles = []
         for i in range(len(ohlcv["close"])):
             if all(ohlcv[k][i] is not None for k in ["open","high","low","close"]):
-                candles.append({"time": timestamps[i], "open": ohlcv["open"][i], "high": ohlcv["high"][i], "low": ohlcv["low"][i], "close": ohlcv["close"][i]})
-    except: return None, "Errore"
+                candles.append({"open": ohlcv["open"][i], "high": ohlcv["high"][i], "low": ohlcv["low"][i], "close": ohlcv["close"][i]})
+        
+        price = closes[-1]
+        ema50_15m = compute_ema(closes, 50)
+        rsi = compute_rsi(closes)
+        bb_upper, _, bb_lower = compute_bollinger(closes)
+        _, _, macd_hist = compute_macd_veloce(closes, symbol)
+        res_max, sup_min = get_support_resistance(candles)
+        pattern = detect_candle_pattern(candles)
+        atr = compute_atr(candles)
 
-    if len(candles) < 100: return None, "Dati insufficienti"
-    price = closes[-1]
-    ema50_15m = compute_ema(closes, 50)
-    atr = compute_atr(candles)
-    rsi = compute_rsi(closes)
-    bb_upper, _, bb_lower = compute_bollinger(closes)
-    macd_line, signal_line, macd_hist = compute_macd(closes)
-    res_max, sup_min = get_support_resistance(candles)
-    pattern = detect_candle_pattern(candles)
-
-    try:
         r_1h = requests.get(url, params={"interval": "1h", "range": "15d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
         closes_1h = [x for x in r_1h["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x is not None]
         ema50_1h = compute_ema(closes_1h, 50)
         ema20_4h = compute_ema(closes_1h, 80)
-    except: return None, "Errore MTF"
+    except:
+        return None
 
-    direction = None
-    if price > ema50_15m and price > ema50_1h: direction = "LONG"
-    elif price < ema50_15m and price < ema50_1h: direction = "SHORT"
-    if direction is None: return None, "Mismatched"
+    dir_base = "NESSUNO"
+    if price > ema50_15m and price > ema50_1h: dir_base = "LONG"
+    elif price < ema50_15m and price < ema50_1h: dir_base = "SHORT"
+    
+    if dir_base == "NESSUNO":
+        return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "Trend M15/H1 disallineato"}
 
+    # ✅ CORREZIONE STRATEGICA: Il Trend H4 diventa vincolo bloccante (Se fallisce, punti azzerati)
+    h4_ok = (dir_base == "LONG" and price > ema20_4h) or (dir_base == "SHORT" and price < ema20_4h)
+    if not h4_ok:
+        return {"symbol": symbol, "punti": 0, "direzione": dir_base, "price": price, "msg": "❌ Bloccato: Contro Trend H4"}
+
+    punti = 2  # Assegnati i 2 punti base per la conferma H4 superata
+    
+    p_bb = 2 if ((dir_base == "LONG" and price <= bb_lower * 1.001) or (dir_base == "SHORT" and price >= bb_upper * 0.999)) else 0
+    p_rsi = 1 if (40 < rsi < 60) else 0
+    p_macd = 2 if ((dir_base == "LONG" and macd_hist > 0) or (dir_base == "SHORT" and macd_hist < 0)) else 0
+    proximity = (atr * 0.5) if atr else 0.001
+    p_sr = 2 if ((dir_base == "LONG" and abs(price - sup_min) <= proximity) or (dir_base == "SHORT" and abs(price - res_max) <= proximity)) else 0
+    p_pat = 2 if ((dir_base == "LONG" and pattern == "HAMMER") or (dir_base == "SHORT" and pattern == "SHOOTING_STAR")) else 0
+    
+    totale = punti + p_bb + p_rsi + p_macd + p_sr + p_pat
+    
     buffer_val = (SPREAD_BUFFER / 10000)
-    if direction == "LONG":
-        sl = (price - atr * 1.5) - buffer_val
-        tp = (price + atr * 2.5) + buffer_val
-    else:
-        sl = (price + atr * 1.5) + buffer_val
-        tp = (price - atr * 2.5) - buffer_val
-
+    sl = (price - atr * 1.5) - buffer_val if dir_base == "LONG" else (price + atr * 1.5) + buffer_val
+    tp = (price + atr * 2.5) + buffer_val if dir_base == "LONG" else (price - atr * 2.5) - buffer_val
     pip_sl = abs(price - sl) * 10000
-    if pip_sl < SL_MIN_PIP: return None, "SL Narrow"
-
-    punti = 0
-    if (direction == "LONG" and price > ema20_4h) or (direction == "SHORT" and price < ema20_4h): punti += 2
-    if (direction == "LONG" and price <= bb_lower * 1.001) or (direction == "SHORT" and price >= bb_upper * 0.999): punti += 2
-    if (40 < rsi < 60): punti += 1
-    if (direction == "LONG" and macd_hist > 0) or (direction == "SHORT" and macd_hist < 0): punti += 2
-    proximity = atr * 0.5
-    if (direction == "LONG" and abs(price - sup_min) <= proximity) or (direction == "SHORT" and abs(price - res_max) <= proximity): punti += 2
-    if (direction == "LONG" and pattern == "HAMMER") or (direction == "SHORT" and pattern == "SHOOTING_STAR"): punti += 2
-
-    if punti >= 8: score, molt = "A+", 1.0
-    elif punti >= 6: score, molt = "A", 0.75
-    else: return None, "Low Score"
-
-    rischio_eur = saldo_virtuale * RISCHIO_BASE * molt
-    lotti = round(max((rischio_eur / (pip_sl * 0.09)) * 0.01, 0.01), 2)
 
     return {
-        "symbol": symbol, "direction": direction, "price": price, "sl": sl, "tp": tp,
-        "pip_sl": pip_sl, "size": lotti, "rischio": rischio_eur, "score": score, "atr": atr, "punti": punti
-    }, "OK"
+        "symbol": symbol, "punti": totale, "direzione": dir_base, "price": price, 
+        "sl": sl, "tp": tp, "pip_sl": pip_sl, "atr": atr, "score": "A+" if totale >= 9 else "A",
+        "msg": f"Filtri superati ({totale}/11)" if totale >= SOGLIA_APPROVAZIONE else "Sotto la soglia minima di 8"
+    }
 
+def genera_report_ispettivo():
+    report = "🔍 *TELEMETRIA INTEGRALE FILTRI*\n-------------------------\n"
+    if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]:
+        report += "⚠️ *Stato*: Ricerca sospesa (Trade in corso)\n-------------------------\n"
+    for symbol in SYMBOLS:
+        res = calcola_matrice_asset(symbol)
+        if res:
+            report += f"💱 *Asset: {res['symbol']}* | Prezzo: `{res['price']:.5f}`\n"
+            report += f"🏷️ Direzione: *{res['direzione']}* | Punti: *{res['punti']}/11*\n"
+            report += f"📋 Diagnosi: _{res['msg']}_\n\n"
+    return report
+
+# ---------------------------------------------------------
+# 7. LOGICA CORE DI TRADING
+# ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
     if not trade_attivo["aperto"]: return
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{trade_attivo['symbol']}"
     try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{trade_attivo['symbol']}"
         r = requests.get(url, params={"interval": "1m", "range": "1d"}, headers={"User-Agent": "Mozilla/5.0"}).json()
         prezzo = r["chart"]["result"][0]["indicators"]["quote"][0]["close"][-1]
     except: return
@@ -384,81 +339,97 @@ def monitora_trade():
     dir_t = trade_attivo["direction"]
     entrata = trade_attivo["entrata"]
     tp = trade_attivo["tp"]
+    sl = trade_attivo["sl"]
     atr_corrente = trade_attivo.get("atr", 0.0015)
-
     distanza_tp = abs(tp - entrata)
+
     if not trade_attivo["be_fatto"]:
-        if dir_t == "LONG" and (prezzo - entrata) >= (distanza_tp * 0.5):
-            trade_attivo["sl"] = entrata; trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}.")
-        elif dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5):
+        if (dir_t == "LONG" and (prezzo - entrata) >= (distanza_tp * 0.5)) or (dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5)):
             trade_attivo["sl"] = entrata; trade_attivo["be_fatto"] = True
             send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}.")
 
     if dir_t == "LONG":
-        nuovo_sl_trailing = prezzo - (atr_corrente * 1.5)
-        if nuovo_sl_trailing > trade_attivo["sl"] and prezzo > entrata: trade_attivo["sl"] = nuovo_sl_trailing
+        n_sl = prezzo - (atr_corrente * 1.5)
+        if n_sl > trade_attivo["sl"] and prezzo > entrata: trade_attivo["sl"] = n_sl
     elif dir_t == "SHORT":
-        nuovo_sl_trailing = prezzo + (atr_corrente * 1.5)
-        if nuovo_sl_trailing < trade_attivo["sl"] and prezzo < entrata: trade_attivo["sl"] = nuovo_sl_trailing
+        n_sl = prezzo + (atr_corrente * 1.5)
+        if n_sl < trade_attivo["sl"] and prezzo < entrata: trade_attivo["sl"] = n_sl
 
+    tolleranza = 0.00005 
     if (dir_t == "LONG" and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Inserisci bilancio.")
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Digita il profitto.")
         trade_attivo["in_attesa_risultato"] = True
-    elif (dir_t == "LONG" and prezzo <= trade_attivo["sl"]) or (dir_t == "SHORT" and prezzo >= trade_attivo["sl"]):
-        send_telegram(f"🛑 *STOP LOSS COLPITO* su {trade_attivo['symbol']}! Inserisci bilancio.")
+    elif (dir_t == "LONG" and prezzo <= (sl - tolleranza)) or (dir_t == "SHORT" and prezzo >= (sl + tolleranza)):
+        send_telegram(f"🛑 *STOP LOSS COLPITO* su {trade_attivo['symbol']}! Digita l'esito finale numerico.")
         trade_attivo["in_attesa_risultato"] = True
 
 def esegui_analisi():
     if not is_mercato_aperto() or not is_orario_sessione() or check_news_block(): return
+    if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]: return
+    
     for symbol in SYMBOLS:
-        signal, _ = analizza(symbol)
-        if signal:
+        res = calcola_matrice_asset(symbol)
+        if res and res["punti"] >= SOGLIA_APPROVAZIONE:
+            rischio_eur = saldo_virtuale * RISCHIO_BASE * (1.0 if res["punti"] >= 9 else 0.75)
+            lotti = round(max((rischio_eur / (res["pip_sl"] * 0.09)) * 0.01, 0.01), 2)
+            
             msg = (
-                f"💎 *SEGNALE PRO {signal['score']} ATTIVO*\n"
-                f"Asset: *{symbol}* | Configurazione: *{signal['direction']}*\n"
-                f"Matrice Punti: `{signal['punti']}/11`📊\n"
-                f"Ingresso: `{signal['price']:.5f}`\n"
-                f"Stop Loss: `{signal['sl']:.5f}`\n"
-                f"Take Profit: `{signal['tp']:.5f}`\n"
-                f"Volume consigliato Fineco: *{signal['size']} lotti*"
+                f"💎 *SEGNALE PRO {res['score']} APPROVATO*\n"
+                f"Asset: *{symbol}* | Tendenza: *{res['direzione']}*\n"
+                f"Matrice Punti: `{res['punti']}/11` 🏆\n"
+                f"Ingresso: `{res['price']:.5f}`\n"
+                f"Stop Loss: `{res['sl']:.5f}`\n"
+                f"Take Profit: `{res['tp']:.5f}`\n"
+                f"Volume Fineco: *{lotti} lotti*"
             )
             send_telegram(msg)
             trade_attivo.update({
-                "aperto": True, "symbol": symbol, "direction": signal["direction"], 
-                "entrata": signal["price"], "sl": signal["sl"], "tp": signal["tp"], 
-                "be_fatto": False, "max_prezzo_raggiunto": signal["price"], "min_prezzo_raggiunto": signal["price"],
-                "atr": signal["atr"], "in_attesa_risultato": False
+                "aperto": True, "symbol": symbol, "direction": res["direzione"], 
+                "entrata": res["price"], "sl": res["sl"], "tp": res["tp"], 
+                "be_fatto": False, "max_prezzo_raggiunto": res["price"], "min_prezzo_raggiunto": res["price"],
+                "atr": res["atr"], "in_attesa_risultato": False
             })
             break
 
+# ---------------------------------------------------------
+# 8. LOOP OPERATIVO CON HEARTBEAT ORARIO AUTOMATICO
+# ---------------------------------------------------------
 def bot_loop():
-    global ultimo_controllo_orario
-    send_telegram("🚀 *SISTEMA DI DIAGNOSTICA QUANTISTICA ATTIVATO*\n_Scrivi 'Filtri' nella chat in qualunque momento per vedere la telemetria dei punti dei mercati._")
+    global ultimo_heartbeat_orario
+    send_telegram("🚀 *CORE ENGINE V3.2 PRO ATTIVATO*\n- Soglia minima inserita a >= 8 punti\n- Filtro H4 bloccante attivo\n- Ottimizzazione MACD anti-timeout completata\n- Sistema Heartbeat orario attivo 🟢")
     invia_report()
     
     while True:
         adesso = datetime.now()
         
-        if adesso.minute == 0 and adesso.hour != ultimo_controllo_orario:
-            ultimo_controllo_orario = adesso.hour
-            if not trade_attivo["aperto"] and is_mercato_aperto() and is_orario_sessione():
-                send_telegram(f"🟢 *Pattugliamento Ore {adesso.hour}:00* - Scansione attiva. Scrivi 'Filtri' per ispezionare.")
+        # ✅ FIX: Heartbeat automatico allo scoccare di ogni ora (Nessun messaggio vuoto)
+        if adesso.minute == 0 and adesso.hour != ultimo_heartbeat_orario:
+            ultimo_heartbeat_orario = adesso.hour
+            status_msg = f"⏱️ *HEARTBEAT ORARIO AUTOMATICO - ORE {adesso.hour}:00*\n"
+            if not is_mercato_aperto():
+                status_msg += "Status: *Stand-by* 💤 (Mercati Chiusi)"
+                send_telegram(status_msg)
+            elif not is_orario_sessione():
+                status_msg += "Status: *Riposo* ⏳ (Fuori orario sessione 9-22)"
+                send_telegram(status_msg)
+            else:
+                status_msg += "Status: *Scansione Attiva* 🟢\n"
+                send_telegram(status_msg)
+                # Invia contestualmente la telemetria dei filtri per controllo visivo automatico
+                send_telegram(genera_report_ispettivo())
 
         msg_in = leggi_messaggio_telegram()
         if msg_in:
             parola = msg_in.strip().lower()
-            # ✅ COMANDO DI TELEMETRIA INTERATTIVA
             if parola in ["filtri", "stato", "telemetria", "test"]:
-                report_ispettivo = genera_report_ispettivo()
-                send_telegram(report_ispettivo)
+                send_telegram(genera_report_ispettivo())
                 continue
                 
             if not msg_in.startswith("/"):
                 if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
                     registra_risultato(msg_in)
                 else:
-                    send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\nNessun trade attivo. Scrivi 'Filtri' per vedere lo stato della matrice.")
+                    send_telegram(f"🤖 *Ricevuto: '{msg_in}'*\nNessun trade aperto. Scrivi 'Filtri' per ispezionare.")
                 continue
         
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
