@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Forex Bot Core v3.3 Pro Safe-Entry Active!", 200
+    return "Forex Bot Core v3.4 Pro Elastic-Entry Active!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -39,13 +39,12 @@ SL_MIN_PIP     = 10
 TP_MIN_PIP     = 15
 MONITOR_MIN    = 2        
 SPREAD_BUFFER  = 1.5  
-SOGLIA_APPROVAZIONE = 8  
+SOGLIA_APPROVAZIONE = 7  # ✅ CALIBRATA A 7: Più flessibile, ma mantiene i blocchi di sicurezza
 
 TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
 FILE_STORICO     = "storico_saldo.txt"
 
-# ✅ AGGIORNAMENTO STATISTICHE: Inserito il 9° trade (-0.90 EUR)
 saldo_virtuale = 105.73  
 stats = {"vinti": 4, "persi": 5, "pareggi": 0, "totali": 9}
 last_update_id = -1
@@ -59,14 +58,12 @@ trade_attivo = {
     "min_prezzo_raggiunto": None, "in_attesa_risultato": False
 }
 
-# Struttura di memoria per la gestione della conferma manuale
 segnale_in_attesa = {
     "attivo": False, "timestamp_generazione": None, "data_trade": None
 }
 
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
-        # Aggiornata la stringa storica includendo il nuovo saldo finale a 105.73
         f.write("100.0\n101.5\n103.0\n105.85\n108.18\n108.10\n108.02\n107.65\n106.63\n105.73\n")
 
 # ---------------------------------------------------------
@@ -176,7 +173,7 @@ def is_orario_sessione():
     return SESSIONE_START <= ora < SESSIONE_END
 
 # ---------------------------------------------------------
-# 5. CALCOLO INDICATORI (Ottimizzati)
+# 5. CALCOLO INDICATORI
 # ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period: return mean(prices) if prices else None
@@ -284,6 +281,7 @@ def calcola_matrice_asset(symbol):
     if dir_base == "NESSUNO":
         return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "Trend M15/H1 disallineato"}
 
+    # Filtro bloccante Trend H4
     h4_ok = (dir_base == "LONG" and price > ema20_4h) or (dir_base == "SHORT" and price < ema20_4h)
     if not h4_ok:
         return {"symbol": symbol, "punti": 0, "direzione": dir_base, "price": price, "msg": "❌ Bloccato: Contro Trend H4"}
@@ -306,7 +304,7 @@ def calcola_matrice_asset(symbol):
     return {
         "symbol": symbol, "punti": totale, "direzione": dir_base, "price": price, 
         "sl": sl, "tp": tp, "pip_sl": pip_sl, "atr": atr, "score": "A+" if totale >= 9 else "A",
-        "msg": f"Filtri superati ({totale}/11)" if totale >= SOGLIA_APPROVAZIONE else "Sotto la soglia minima di 8"
+        "msg": f"Filtri superati ({totale}/11)" if totale >= SOGLIA_APPROVAZIONE else f"Sotto la nuova soglia minima di {SOGLIA_APPROVAZIONE}"
     }
 
 def genera_report_ispettivo():
@@ -370,21 +368,21 @@ def esegui_analisi():
     for symbol in SYMBOLS:
         res = calcola_matrice_asset(symbol)
         if res and res["punti"] >= SOGLIA_APPROVAZIONE:
+            # ✅ Calibrazione rischio elastica: 100% size per i 9+, 75% size prudenziale per i segnali da 7-8 punti
             rischio_eur = saldo_virtuale * RISCHIO_BASE * (1.0 if res["punti"] >= 9 else 0.75)
             lotti = round(max((rischio_eur / (res["pip_sl"] * 0.09)) * 0.01, 0.01), 2)
             
-            # ✅ MODIFICA SAFE-ENTRY: Il segnale richiede la conferma esplicita
             msg = (
                 f"⚠️ *SEGNALE GENERATO - IN ATTESA DI CONFERMA OPERATIVA*\n"
                 f"Asset: *{symbol}* | Tendenza: *{res['direzione']}* ({res['punti']}/11 Punti)\n"
+                f"Classe Segnale: *Classe {res['score']}*\n"
                 f"Ingresso consigliato: `{res['price']:.5f}`\n"
                 f"Stop Loss: `{res['sl']:.5f}` | Take Profit: `{res['tp']:.5f}`\n"
                 f"Volume Fineco: *{lotti} lotti*\n\n"
-                f"👉 Scrivi *'Entrato'* (o 'ok') entro 5 minuti per confermare l'apertura su Fineco, altrimenti il segnale scadrà."
+                f"👉 Scrivi *'Entrato'* (o 'ok') entro 5 minuti per confermare, altrimenti il segnale scadrà."
             )
             send_telegram(msg)
             
-            # Salviamo il pacchetto dati temporaneamente
             segnale_in_attesa.update({
                 "attivo": True,
                 "timestamp_generazione": time.time(),
@@ -400,19 +398,17 @@ def esegui_analisi():
 # ---------------------------------------------------------
 def bot_loop():
     global ultimo_heartbeat_orario, segnale_in_attesa, trade_attivo
-    send_telegram("🚀 *CORE V3.3 PRO - SAFE-ENTRY ATTIVATO*\n- Statistiche allineate (9 Trade totali | Saldo: 105.73 EUR)\n- Sistema di richiesta conferma ingresso attivo 🛡️")
+    send_telegram(f"🚀 *CORE V3.4 PRO - ELASTIC ENTRY ATTIVATO*\n- Nuova soglia minima impostata a >= {SOGLIA_APPROVAZIONE} punti 📊\n- Filtro Trend H4 e Doppia Conferma rimangono attivi per la massima sicurezza.")
     invia_report()
     
     while True:
         adesso_dt = datetime.now()
         
-        # Gestione Scadenza Segnale (Timeout 5 minuti = 300 secondi)
         if segnale_in_attesa["attivo"]:
             if time.time() - segnale_in_attesa["timestamp_generazione"] > 300:
                 send_telegram(f"❌ *SEGNALE SCADUTO*: Nessuna conferma ricevuta per {segnale_in_attesa['data_trade']['symbol']}. Ricerca ripresa.")
                 segnale_in_attesa["attivo"] = False
         
-        # Heartbeat Orario Automatico
         if adesso_dt.minute == 0 and adesso_dt.hour != ultimo_heartbeat_orario:
             ultimo_heartbeat_orario = adesso_dt.hour
             status_msg = f"⏱️ *HEARTBEAT ORARIO AUTOMATICO - ORE {adesso_dt.hour}:00*\n"
@@ -430,7 +426,6 @@ def bot_loop():
                 send_telegram(genera_report_ispettivo())
                 continue
             
-            # ✅ GESTIONE CONFERMA SEGNALE IN ATTESA
             if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
                 dt = segnale_in_attesa["data_trade"]
                 trade_attivo.update({
