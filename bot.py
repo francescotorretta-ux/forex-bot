@@ -343,20 +343,45 @@ def get_support_resistance(candles):
     lows  = [c["low"]  for c in candles[-100:]]
     return max(highs), min(lows)
 
+# ✅ POTENZIATO: Rilevamento Completo Hammer, Shooting Star, Engulfing e Doji
 def detect_candle_pattern(candles):
     if len(candles) < 2:
         return "NONE"
-    c          = candles[-1]
-    body       = abs(c["close"] - c["open"])
-    total_range = c["high"] - c["low"]
+    
+    c_att = candles[-1]  # Candela attuale
+    c_prec = candles[-2] # Candela precedente
+    
+    body_att      = abs(c_att["close"] - c_att["open"])
+    total_range   = c_att["high"] - c_att["low"]
+    
     if total_range == 0:
-        return "NONE"
-    lower_shadow = min(c["open"], c["close"]) - c["low"]
-    upper_shadow = c["high"] - max(c["open"], c["close"])
-    if lower_shadow >= (body * 2) and upper_shadow <= (total_range * 0.2):
+        return "DOJI"
+        
+    lower_shadow  = min(c_att["open"], c_att["close"]) - c_att["low"]
+    upper_shadow  = c_att["high"] - max(c_att["open"], c_att["close"])
+    
+    # 1. RILEVAMENTO DOJI (Corpo piccolissimo rispetto al range totale)
+    if body_att <= (total_range * 0.1):
+        return "DOJI"
+        
+    # 2. RILEVAMENTO ENGULFING
+    body_prec = abs(c_prec["close"] - c_prec["open"])
+    if body_att > body_prec:
+        # Bullish Engulfing (Candela attuale verde ingloba candela precedente rossa)
+        if c_att["close"] > c_att["open"] and c_prec["close"] < c_prec["open"]:
+            if c_att["close"] >= c_prec["open"] and c_att["open"] <= c_prec["close"]:
+                return "BULLISH_ENGULFING"
+        # Bearish Engulfing (Candela attuale rossa ingloba candela precedente verde)
+        if c_att["close"] < c_att["open"] and c_prec["close"] > c_prec["open"]:
+            if c_att["close"] <= c_prec["open"] and c_att["open"] >= c_prec["close"]:
+                return "BEARISH_ENGULFING"
+
+    # 3. RILEVAMENTO HAMMER & SHOOTING STAR
+    if lower_shadow >= (body_att * 2) and upper_shadow <= (total_range * 0.2):
         return "HAMMER"
-    if upper_shadow >= (body * 2) and lower_shadow <= (total_range * 0.2):
+    if upper_shadow >= (body_att * 2) and lower_shadow <= (total_range * 0.2):
         return "SHOOTING_STAR"
+        
     return "NONE"
 
 # ---------------------------------------------------------
@@ -414,9 +439,18 @@ def calcola_matrice_asset(symbol):
     p_bb   = 2 if ((dir_base == "LONG" and price <= bb_lower * 1.001) or (dir_base == "SHORT" and price >= bb_upper * 0.999)) else 0
     p_rsi  = 1 if (40 < rsi < 60) else 0
     p_macd = 2 if ((dir_base == "LONG" and macd_hist > 0) or (dir_base == "SHORT" and macd_hist < 0)) else 0
+    
     proximity = (atr * 0.5) if atr else 0.001
-    p_sr   = 2 if ((dir_base == "LONG" and abs(price - sup_min) <= proximity) or (dir_base == "SHORT" and abs(price - res_max) <= proximity)) else 0
-    p_pat  = 2 if ((dir_base == "LONG" and pattern == "HAMMER") or (dir_base == "SHORT" and pattern == "SHOOTING_STAR")) else 0
+    is_near_support = abs(price - sup_min) <= proximity
+    is_near_resistance = abs(price - res_max) <= proximity
+    p_sr   = 2 if ((dir_base == "LONG" and is_near_support) or (dir_base == "SHORT" and is_near_resistance)) else 0
+    
+    # ✅ FIX FILTRI CON NUOVI PATTERN COMPLETI
+    p_pat  = 0
+    if dir_base == "LONG" and (pattern == "HAMMER" or pattern == "BULLISH_ENGULFING" or (pattern == "DOJI" and is_near_support)):
+        p_pat = 2
+    elif dir_base == "SHORT" and (pattern == "SHOOTING_STAR" or pattern == "BEARISH_ENGULFING" or (pattern == "DOJI" and is_near_resistance)):
+        p_pat = 2
 
     totale = punti + p_bb + p_rsi + p_macd + p_sr + p_pat
 
@@ -435,7 +469,7 @@ def calcola_matrice_asset(symbol):
         "pip_sl":    pip_sl,
         "atr":       atr,
         "score":     "A+" if totale >= 9 else "A",
-        "msg":       f"Filtri superati ({totale}/11)" if totale >= SOGLIA_APPROVAZIONE else f"Sotto soglia ({SOGLIA_APPROVAZIONE})"
+        "msg":       f"Filtri superati ({totale}/11) [{pattern}]" if totale >= SOGLIA_APPROVAZIONE else f"Sotto soglia ({SOGLIA_APPROVAZIONE}) [{pattern}]"
     }
 
 def genera_report_ispettivo():
@@ -544,6 +578,7 @@ def bot_loop():
         f"🚀 *FOREX BOT v4.1 TWELVE DATA* \n"
         f"- Alimentazione dati professionale attiva 🟢\n"
         f"- Soglia minima elastica: >= {SOGLIA_APPROVAZIONE} punti\n"
+        f"- Candele incluse: Hammer, Shooting Star, Engulfing, Doji 📊\n"
         f"- Stato persistente salvato ed operativo!"
     )
     invia_report()
@@ -593,13 +628,13 @@ def bot_loop():
                 time.sleep(60)
                 continue
 
-        # ✅ OTTIMIZZATO: Se c'è un trade lo monitora ogni minuto, se non c'è aspetta 15 minuti per salvare i crediti
+        # Se c'è un trade lo monitora ogni minuto, se non c'è aspetta 15 minuti per salvare i crediti
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
             time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(15 * 60) # Controlla ogni 15 minuti (pari al timeframe operativo base)
+            time.sleep(15 * 60) # Controlla ogni 15 minuti per ottimizzare Twelve Data
 
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
