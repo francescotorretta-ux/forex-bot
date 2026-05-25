@@ -40,9 +40,10 @@ SPREAD_BUFFER    = 1.5
 SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN      = 1        
 
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+# Credenziali inserite direttamente nel codice per avvio immediato
+TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
+TELEGRAM_CHAT_ID = "6559735989"
+TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
 FILE_STORICO     = "storico_saldo.txt"
 FILE_STATO       = "stato_bot.json"   
@@ -592,12 +593,13 @@ def bot_loop():
                 time.sleep(60)
                 continue
 
+        # ✅ OTTIMIZZATO: Se c'è un trade lo monitora ogni minuto, se non c'è aspetta 15 minuti per salvare i crediti
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
             time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(60)
+            time.sleep(15 * 60) # Controlla ogni 15 minuti (pari al timeframe operativo base)
 
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
