@@ -40,9 +40,9 @@ SPREAD_BUFFER    = 1.5
 SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN      = 1        
 
-TELEGRAM_TOKEN   = os.environ.get("8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI", "")
-TELEGRAM_CHAT_ID = os.environ.get("6559735989", "")
-TWELVEDATA_API_KEY = os.environ.get("f7ad19a1b160485cb773bacfad03543d", "")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 
 FILE_STORICO     = "storico_saldo.txt"
 FILE_STATO       = "stato_bot.json"   
