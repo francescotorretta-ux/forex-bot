@@ -41,7 +41,7 @@ SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN      = 1        
 
 # Credenziali inserite direttamente nel codice per avvio immediato
-TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
+TELEGRAM_TOKEN   = "8661209874:AAHG2zvEDuSI-hXgJfYzCTo_pwtCgLBSsb4"
 TELEGRAM_CHAT_ID = "6559735989"
 TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
