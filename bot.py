@@ -40,8 +40,8 @@ SPREAD_BUFFER    = 1.5
 SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN      = 1        
 
-# Credenziali inserite direttamente nel codice per avvio immediato
-TELEGRAM_TOKEN   = "8661209874:AAHG2zvEDuSI-hXgJfYzCTo_pwtCgLBSsb4"
+# Credenziali inserite direttamente nel codice per sicurezza immediata
+TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
 TELEGRAM_CHAT_ID = "6559735989"
 TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
@@ -78,7 +78,7 @@ stats            = _stato["stats"]
 last_update_id          = -1
 ultimo_heartbeat_orario = -1
 macd_memoria            = {}
-pausa_bot_fino          = None  # Gestione pausa dinamica
+pausa_bot_fino          = None  
 
 trade_attivo = {
     "aperto": False, "symbol": None, "direction": None, "entrata": None,
@@ -427,10 +427,10 @@ def calcola_matrice_asset(symbol):
     if any(v is None for v in [ema50_15m, ema50_1h, bb_upper, bb_lower, atr]):
         return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "Inizializzazione dati..."}
 
-    # FILTRO VOLATILITÀ AVANZATO (Evita mercati piatti / Bande troppo strette)
+    # FILTRO VOLATILITÀ
     larghezza_bb_pips = (bb_upper - bb_lower) * 10000
     if larghezza_bb_pips < 8.0:
-        return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "❌ Bloccato: Volatilità troppo bassa (BB Squeeze)"}
+        return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "❌ Bloccato: Volatilità bassa (BB Squeeze)"}
 
     dir_base = "NESSUNO"
     if price > ema50_15m and price > ema50_1h:
@@ -449,7 +449,7 @@ def calcola_matrice_asset(symbol):
     if ema200_h1:
         h1_200_ok = (dir_base == "LONG" and price > ema200_h1) or (dir_base == "SHORT" and price < ema200_h1)
         if not h1_200_ok:
-            return {"symbol": symbol, "punti": 0, "direzione": dir_base, "price": price, "msg": "❌ Bloccato: Contro Trend Lungo Termine H1 (EMA200)"}
+            return {"symbol": symbol, "punti": 0, "direzione": dir_base, "price": price, "msg": "❌ Bloccato: Contro EMA200 H1"}
 
     punti  = 2  
     p_bb   = 2 if ((dir_base == "LONG" and price <= bb_lower * 1.001) or (dir_base == "SHORT" and price >= bb_upper * 0.999)) else 0
@@ -526,15 +526,15 @@ def monitora_trade():
     atr_c      = trade_attivo.get("atr", 0.0015)
     distanza_tp = abs(tp - entrata)
 
-    # 1. Gestione Standard Break-Even a metà strada dal Target
+    # 1. Break-Even
     if not trade_attivo["be_fatto"]:
         if (dir_t == "LONG"  and (prezzo - entrata) >= (distanza_tp * 0.5)) or \
            (dir_t == "SHORT" and (entrata - prezzo) >= (distanza_tp * 0.5)):
             trade_attivo["sl"]       = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']} (Messo al sicuro).")
+            send_telegram(f"🛡️ *BREAK-EVEN ATTIVATO* su {trade_attivo['symbol']}.")
 
-    # 2. IMPLEMENTAZIONE TRAILING STOP DINAMICO (Insegue il prezzo lasciando respiro all'ATR)
+    # 2. TRAILING STOP DINAMICO
     if dir_t == "LONG":
         nuovo_sl_inseguimento = prezzo - (atr_c * 1.5)
         if nuovo_sl_inseguimento > trade_attivo["sl"] and prezzo > entrata:
@@ -546,11 +546,11 @@ def monitora_trade():
 
     tolleranza = 0.00005
     if (dir_t == "LONG"  and prezzo >= tp) or (dir_t == "SHORT" and prezzo <= tp):
-        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Inserisci il profitto netto (es: `+2.45`).")
+        send_telegram(f"🎯 *TARGET RAGGIUNTO* su {trade_attivo['symbol']}! Digita il profitto netto (es: `+2.45`).")
         trade_attivo["in_attesa_risultato"] = True
     elif (dir_t == "LONG"  and prezzo <= (trade_attivo["sl"] - tolleranza)) or \
          (dir_t == "SHORT" and prezzo >= (trade_attivo["sl"] + tolleranza)):
-        send_telegram(f"🛑 *TRAILING STOP/STOP LOSS COLPITO* su {trade_attivo['symbol']}! Inserisci l'esito numerico.")
+        send_telegram(f"🛑 *TRAILING STOP COLPITO* su {trade_attivo['symbol']}! Inserisci l'esito numerico.")
         trade_attivo["in_attesa_risultato"] = True
 
 # ---------------------------------------------------------
@@ -623,36 +623,32 @@ def bot_loop():
         if msg_in:
             parola = msg_in.strip().lower()
 
-            # Comando di Telemetria Manuale
             if parola in ["filtri", "stato", "telemetria", "test"]:
                 send_telegram(genera_report_ispettivo())
                 time.sleep(10)
                 continue
 
-            # Comandi di Pausa / Sospensione
             if parola in ["pausa", "sospendi", "stop_analisi"]:
                 pausa_bot_fino = datetime.now() + timedelta(hours=2)
-                send_telegram("⏸️ *Analisi sospesa per 2 ore*. Nessun segnale verrà generato fino a nuova attivazione.")
+                send_telegram("⏸️ *Analisi sospesa per 2 ore*.")
                 continue
 
             if parola in ["riprendi", "attiva", "go_analisi"]:
                 pausa_bot_fino = None
-                send_telegram("▶️ *Analisi ripresa immediatamente*. Scansione Twelve Data attiva.")
+                send_telegram("▶️ *Analisi ripresa immediatamente*.")
                 continue
 
-            # Comando di Taratura Rapida del Saldo da Telegram
             if parola.startswith("saldo "):
                 try:
                     nuovo_s = float(parola.split()[1].replace(",", "."))
                     saldo_virtuale = nuovo_s
                     salva_stato()
-                    send_telegram(f"💰 *Saldo allineato con successo!* Nuovo capitale: {saldo_virtuale:.2f} EUR")
+                    send_telegram(f"💰 *Saldo allineato!* Nuovo capitale: {saldo_virtuale:.2f} EUR")
                     invia_report()
                 except:
-                    send_telegram("⚠️ Formato errato. Usa: `Saldo 105.50`")
+                    send_telegram("⚠️ Usa: `Saldo 105.50`")
                 continue
 
-            # Conferma ingresso segnale
             if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
                 dt = segnale_in_attesa["data_trade"]
                 trade_attivo.update({
@@ -663,7 +659,7 @@ def bot_loop():
                     "in_attesa_risultato": False
                 })
                 segnale_in_attesa["attivo"] = False
-                send_telegram(f"🚀 Trade su {dt['symbol']} registrato. Trailing Stop automatico inserito.")
+                send_telegram(f"🚀 Trade su {dt['symbol']} registrato. Trailing attivi.")
                 time.sleep(10)
                 continue
 
@@ -671,17 +667,16 @@ def bot_loop():
                 if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
                     registra_risultato(msg_in)
                 else:
-                    send_telegram(f"🤖 Nessun trade a mercato. Scrivi 'Filtri' per la telemetria o 'Pausa' per bloccarmi.")
+                    send_telegram(f"🤖 Scrivi 'Filtri' per la telemetria.")
                 time.sleep(10)
                 continue
 
-        # Gestione dei tempi di attesa differenziati per risparmiare crediti Twelve Data
         if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
             monitora_trade()
-            time.sleep(MONITOR_MIN * 60) # Se c'è un trade a mercato, monitora ogni minuto
+            time.sleep(MONITOR_MIN * 60)
         else:
             esegui_analisi()
-            time.sleep(15 * 60) # Se non ci sono trade, scansiona ogni 15 minuti (~312 crediti al giorno su 800)
+            time.sleep(15 * 60) 
 
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
