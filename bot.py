@@ -8,7 +8,7 @@ from threading import Thread
 from flask import Flask
 
 # ---------------------------------------------------------
-# 1. SERVER WEB FANTASMA
+# 1. SERVER WEB FANTASMA (Render Keep-Alive)
 # ---------------------------------------------------------
 app = Flask(__name__)
 
@@ -40,8 +40,8 @@ SPREAD_BUFFER    = 1.5
 SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN      = 1        
 
-# Credenziali inserite direttamente nel codice per sicurezza immediata
-TELEGRAM_TOKEN   = "8661209874:AAEJoMSfIVQ35TOrgACCF-cO6zlQWcAVuuI"
+# CREDENZIALI INSERITE DIRETTAMENTE PER EVITARE DISALLINEAMENTI SU RENDER
+TELEGRAM_TOKEN   = "8661209874: AAHG2zvEDuSI-hXgJfYzCTo_pwtCgLBSsb4"
 TELEGRAM_CHAT_ID = "6559735989"
 TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
@@ -99,7 +99,6 @@ if not os.path.exists(FILE_STORICO):
 # ---------------------------------------------------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[TELEGRAM] {msg}")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -237,7 +236,6 @@ def check_news_block():
 # ---------------------------------------------------------
 def fetch_candles(symbol, interval, outputsize=100):
     if not TWELVEDATA_API_KEY:
-        print("[ERRORE] Manca la chiave API TWELVEDATA_API_KEY.")
         return None, None
 
     url = "https://api.twelvedata.com/time_series"
@@ -427,7 +425,7 @@ def calcola_matrice_asset(symbol):
     if any(v is None for v in [ema50_15m, ema50_1h, bb_upper, bb_lower, atr]):
         return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "Inizializzazione dati..."}
 
-    # FILTRO VOLATILITÀ
+    # FILTRO VOLATILITÀ (Evita falsi segnali su mercato laterale)
     larghezza_bb_pips = (bb_upper - bb_lower) * 10000
     if larghezza_bb_pips < 8.0:
         return {"symbol": symbol, "punti": 0, "direzione": "NESSUNO", "price": price, "msg": "❌ Bloccato: Volatilità bassa (BB Squeeze)"}
@@ -600,8 +598,7 @@ def bot_loop():
         f"🚀 *FOREX BOT v4.2 PRO TWELVE DATA* \n"
         f"- Scansione intelligente attiva 🟢\n"
         f"- Filtro Trend Istituzionale: EMA 200 (H1) + EMA 20 (H4) Abilitato 📈\n"
-        f"- Protezione Capitale: Trailing Stop Automatico & Bollinger Squeeze 🛡️\n"
-        f"- Crediti salvaguardati (Controllo ogni 15 minuti)"
+        f"- Protezione Capitale: Trailing Stop Automatico & Bollinger Squeeze 🛡️"
     )
     invia_report()
 
