@@ -42,7 +42,7 @@ except:
     HAS_MATPLOTLIB = False
 
 # ---------------------------------------------------------
-# CONFIGURAZIONE
+# CONFIGURAZIONE GENERALE
 # ---------------------------------------------------------
 SYMBOLS             = ["EUR/USD", "GBP/USD"]
 SALDO_INIZIALE      = 100.0
@@ -60,6 +60,7 @@ SESSIONI_OTTIMALI = [
     (16, 18),
 ]
 
+# CREDENZIALI INTEGRATE
 TELEGRAM_TOKEN      = "8661209874:AAHG2zvEDuSI-hXgJfYzCTo_pwtCgLBSsb4"
 TELEGRAM_CHAT_ID    = "6559735989"
 TWELVEDATA_API_KEY  = "f7ad19a1b160485cb773bacfad03543d"
@@ -123,7 +124,7 @@ if not os.path.exists(FILE_STORICO):
         f.write("100.0\n105.73\n")
 
 # ---------------------------------------------------------
-# TELEGRAM
+# FUNZIONI TELEGRAM
 # ---------------------------------------------------------
 def send_telegram(msg):
     try:
@@ -170,7 +171,7 @@ def leggi_messaggio_telegram():
     return None
 
 # ---------------------------------------------------------
-# GRAFICO EQUITY
+# GRAFICI E REPORTistica
 # ---------------------------------------------------------
 def genera_e_invia_grafico(testo_report):
     if not HAS_MATPLOTLIB:
@@ -194,9 +195,6 @@ def genera_e_invia_grafico(testo_report):
     except:
         send_telegram(testo_report)
 
-# ---------------------------------------------------------
-# REPORT
-# ---------------------------------------------------------
 def invia_report():
     wr       = (stats["vinti"] / stats["totali"] * 100) if stats["totali"] > 0 else 0
     profitto = saldo_virtuale - SALDO_INIZIALE
@@ -219,9 +217,6 @@ def invia_report():
     )
     genera_e_invia_grafico(msg)
 
-# ---------------------------------------------------------
-# REGISTRA RISULTATO
-# ---------------------------------------------------------
 def registra_risultato(testo):
     global saldo_virtuale, stats, trade_attivo
     testo = testo.strip().replace(",", ".")
@@ -265,7 +260,7 @@ def registra_risultato(testo):
     return True
 
 # ---------------------------------------------------------
-# CONTROLLI MERCATO
+# FILTRI TEMPORALI
 # ---------------------------------------------------------
 def is_mercato_aperto():
     giorno = datetime.now().weekday()
@@ -295,7 +290,7 @@ def check_news_block():
     return False
 
 # ---------------------------------------------------------
-# FETCH DATI TWELVEDATA
+# RECUPERO DATI TWELVEDATA
 # ---------------------------------------------------------
 def fetch_candles(symbol, interval, outputsize=100):
     try:
@@ -335,7 +330,7 @@ def fetch_candles(symbol, interval, outputsize=100):
         return None, None
 
 # ---------------------------------------------------------
-# INDICATORI
+# CALCOLO INDICATORI MATEMATICI
 # ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period:
@@ -434,7 +429,7 @@ def detect_pattern(candles, direction, atr):
     return 0, "Nessun pattern"
 
 # ---------------------------------------------------------
-# MATRICE SCORE
+# ALGORITMO DI SELEZIONE MATRICE SCORE
 # ---------------------------------------------------------
 def calcola_matrice(symbol):
     closes_15m, candles_15m = fetch_candles(symbol, "15min", outputsize=100)
@@ -473,7 +468,7 @@ def calcola_matrice(symbol):
     if direction is None:
         return None, "Trend 15m/1H non allineato"
 
-    if len(closes_4h) >= 20 and ema20_4h:
+    if closes_4h and len(closes_4h) >= 20 and ema20_4h:
         if direction == "LONG"  and price < ema20_4h: return None, "Bloccato: contro trend 4H"
         if direction == "SHORT" and price > ema20_4h: return None, "Bloccato: contro trend 4H"
 
@@ -620,7 +615,7 @@ def genera_telemetria():
     return report
 
 # ---------------------------------------------------------
-# MONITOR TRADE
+# INSEGUIMENTO PREZZO / MONITOR
 # ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
@@ -703,7 +698,7 @@ def monitora_trade():
                 "Considera chiusura manuale".format(symbol, abs(pip_profit)))
 
 # ---------------------------------------------------------
-# ESEGUI ANALISI
+# CICLO DI ANALISI
 # ---------------------------------------------------------
 def esegui_analisi():
     global segnale_in_attesa
@@ -775,7 +770,7 @@ def esegui_analisi():
             return
 
 # ---------------------------------------------------------
-# HEARTBEAT ORARIO
+# HEARTBEAT OGNI ORA
 # ---------------------------------------------------------
 def invia_heartbeat():
     global ultimo_heartbeat_ora
@@ -814,12 +809,12 @@ def invia_heartbeat():
                 saldo_virtuale))
 
 # ---------------------------------------------------------
-# BOT LOOP
+# MAIN LOOP
 # ---------------------------------------------------------
 def bot_loop():
     global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale
 
-    print("FOREX ENGINE AVVIATO SU RENDER")
+    print("FOREX ENGINE AVVIATO SU RENDER (TWELVEDATA)")
 
     send_telegram(
         "*FOREX ENGINE AVVIATO*\n"
