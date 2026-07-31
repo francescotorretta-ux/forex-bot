@@ -69,12 +69,12 @@ FILE_STORICO        = "storico_saldo.txt"
 FILE_STATO          = "stato_bot.json"
 
 # ---------------------------------------------------------
-# PERSISTENZA STATO
+# PERSISTENZA STATO (AGGIORNATO A 31 TRADE E 107.89 EUR)
 # ---------------------------------------------------------
 def carica_stato():
     default = {
-        "saldo_virtuale": 105.73,
-        "stats": {"vinti": 4, "persi": 5, "pareggi": 0, "totali": 9}
+        "saldo_virtuale": 107.89,
+        "stats": {"vinti": 18, "persi": 13, "pareggi": 0, "totali": 31}
     }
     if os.path.exists(FILE_STATO):
         try:
@@ -119,9 +119,10 @@ segnale_in_attesa = {
     "data_trade"           : None
 }
 
+# Se non esiste lo storico o va riallineato
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
-        f.write("100.0\n105.73\n")
+        f.write("100.0\n107.89\n")
 
 # ---------------------------------------------------------
 # FUNZIONI TELEGRAM
@@ -171,7 +172,7 @@ def leggi_messaggio_telegram():
     return None
 
 # ---------------------------------------------------------
-# GRAFICI E REPORTistica
+# GRAFICI E REPORTISTICA
 # ---------------------------------------------------------
 def genera_e_invia_grafico(testo_report):
     if not HAS_MATPLOTLIB:
