@@ -69,7 +69,7 @@ FILE_STORICO        = "storico_saldo.txt"
 FILE_STATO          = "stato_bot.json"
 
 # ---------------------------------------------------------
-# PERSISTENZA STATO (AGGIORNATO A 31 TRADE E 107.89 EUR)
+# PERSISTENZA STATO
 # ---------------------------------------------------------
 def carica_stato():
     default = {
@@ -119,7 +119,6 @@ segnale_in_attesa = {
     "data_trade"           : None
 }
 
-# Se non esiste lo storico o va riallineato
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
         f.write("100.0\n107.89\n")
@@ -813,7 +812,7 @@ def invia_heartbeat():
 # MAIN LOOP
 # ---------------------------------------------------------
 def bot_loop():
-    global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale
+    global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale, stats
 
     print("FOREX ENGINE AVVIATO SU RENDER (TWELVEDATA)")
 
@@ -822,13 +821,13 @@ def bot_loop():
         "*Render Cloud 24/7*\n\n"
         "Saldo: *{:.2f} EUR*\n"
         "Win Rate: *{:.1f}%* ({} trade)\n\n"
-        "Comandi:\n"
-        "Entrato → conferma trade\n"
-        "filtri → telemetria\n"
-        "pausa → sospendi 2 ore\n"
-        "riprendi → riattiva\n"
-        "saldo X.XX → imposta saldo\n"
-        "+X.XX/-X.XX → registra esito"
+        "Comandi disponibili:\n"
+        "• Entrato → conferma trade\n"
+        "• filtri → telemetria\n"
+        "• pausa / riprendi → gestione analisi\n"
+        "• saldo X.XX → imposta nuovo saldo\n"
+        "• stats V P PA → imposta vinti/persi/pareggi (es: stats 19 13 0)\n"
+        "• +X.XX / -X.XX → registra esito singolo trade"
     )
     invia_report()
 
@@ -860,6 +859,7 @@ def bot_loop():
                     send_telegram("▶️ *Analisi ripresa immediatamente*.")
                     continue
 
+                # COMANDO IMPOSTA SALDO
                 if parola.startswith("saldo "):
                     try:
                         saldo_virtuale = float(parola.split()[1].replace(",", "."))
@@ -867,7 +867,32 @@ def bot_loop():
                         send_telegram("💰 Saldo aggiornato: {:.2f} EUR".format(saldo_virtuale))
                         invia_report()
                     except:
-                        pass
+                        send_telegram("⚠️ Formato errato. Usa: `saldo 110.50`")
+                    continue
+
+                # NUOVO COMANDO IMPOSTA STATS (vinti, persi, pareggi)
+                if parola.startswith("stats "):
+                    try:
+                        parti = parola.split()
+                        vinti = int(parti[1])
+                        persi = int(parti[2])
+                        pareggi = int(parti[3]) if len(parti) > 3 else 0
+
+                        stats["vinti"] = vinti
+                        stats["persi"] = persi
+                        stats["pareggi"] = pareggi
+                        stats["totali"] = vinti + persi + pareggi
+                        
+                        salva_stato()
+                        send_telegram(
+                            "📊 *Statistiche Aggiornate Manualmente*\n"
+                            "Vinti: {}\nPersi: {}\nPareggi: {}\nTotali: {}".format(
+                                vinti, persi, pareggi, stats["totali"]
+                            )
+                        )
+                        invia_report()
+                    except:
+                        send_telegram("⚠️ Formato errato. Usa: `stats 19 13 0` (Vinti Persi Pareggi)")
                     continue
 
                 if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
