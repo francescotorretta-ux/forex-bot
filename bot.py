@@ -2,6 +2,8 @@ import requests
 import time
 import os
 import json
+import pickle
+import numpy as np
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from threading import Thread
@@ -17,7 +19,7 @@ def home():
     ora = datetime.now().strftime("%H:%M:%S")
     wr  = (stats["vinti"] / stats["totali"] * 100) if stats["totali"] > 0 else 0
     return (
-        "FOREX BOT ONLINE\n"
+        "FOREX BOT + ML ONLINE\n"
         "Ora: {}\n"
         "Saldo: {:.2f} EUR\n"
         "Win Rate: {:.1f}%\n"
@@ -42,7 +44,103 @@ except:
     HAS_MATPLOTLIB = False
 
 # ---------------------------------------------------------
-# CONFIGURAZIONE GENERALE
+# CARICA MODELLO ML
+# ---------------------------------------------------------
+ML_MODEL    = None
+ML_FEATURES = None
+
+def carica_modello():
+    global ML_MODEL, ML_FEATURES
+    try:
+        with open("forex_model.pkl", "rb") as f:
+            data = pickle.load(f)
+        ML_MODEL    = data["model"]
+        ML_FEATURES = data["features"]
+        print("Modello ML caricato")
+        return True
+    except Exception as e:
+        print("Modello ML non disponibile: {}".format(e))
+        return False
+
+def predici_ml(closes, highs, lows, opens):
+    if ML_MODEL is None or len(closes) < 30:
+        return None, 0.0
+
+    try:
+        def ema(series, period):
+            s = pd.Series(series)
+            return s.ewm(span=period, adjust=False).mean().iloc[-1]
+
+        def rsi(series, period=14):
+            s = pd.Series(series)
+            delta = s.diff()
+            gain  = delta.clip(lower=0).rolling(period).mean()
+            loss  = (-delta.clip(upper=0)).rolling(period).mean()
+            rs    = gain / (loss + 1e-10)
+            return (100 - (100 / (1 + rs))).iloc[-1]
+
+        import pandas as pd
+
+        c = pd.Series(closes)
+        h = pd.Series(highs)
+        l = pd.Series(lows)
+        o = pd.Series(opens)
+
+        ema50  = c.ewm(span=50,  adjust=False).mean().iloc[-1]
+        ema200 = c.ewm(span=200, adjust=False).mean().iloc[-1] if len(closes) >= 200 else ema50
+
+        rsi_val = rsi(closes)
+
+        ema12 = c.ewm(span=12, adjust=False).mean()
+        ema26 = c.ewm(span=26, adjust=False).mean()
+        macd_l = ema12 - ema26
+        macd_s = macd_l.ewm(span=9, adjust=False).mean()
+        macd_h = (macd_l - macd_s).iloc[-1]
+
+        ma20   = c.rolling(20).mean()
+        sd20   = c.rolling(20).std()
+        bb_up  = (ma20 + 2*sd20).iloc[-1]
+        bb_lo  = (ma20 - 2*sd20).iloc[-1]
+        bb_w   = (bb_up - bb_lo) / (ma20.iloc[-1] + 1e-10) * 100
+        bb_pos = (closes[-1] - bb_lo) / (bb_up - bb_lo + 1e-10)
+
+        tr = pd.concat([
+            h - l,
+            (h - c.shift()).abs(),
+            (l - c.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr_val  = tr.rolling(14).mean().iloc[-1]
+        atr_mean = tr.rolling(14).mean().rolling(30).mean().iloc[-1]
+        vol_rat  = atr_val / (atr_mean + 1e-10)
+
+        p_ema50  = (closes[-1] - ema50)  / (atr_val + 1e-10)
+        p_ema200 = (closes[-1] - ema200) / (atr_val + 1e-10)
+        body     = (closes[-1] - opens[-1]) / (atr_val + 1e-10)
+        mom3     = (closes[-1] / closes[-4] - 1) * 100 if len(closes) >= 4 else 0
+        mom10    = (closes[-1] / closes[-11] - 1) * 100 if len(closes) >= 11 else 0
+
+        X = np.array([[
+            rsi_val, macd_h, bb_w, bb_pos,
+            p_ema50, p_ema200,
+            body, mom3, mom10, vol_rat
+        ]])
+
+        proba = ML_MODEL.predict_proba(X)[0]
+        pred  = ML_MODEL.predict(X)[0]
+
+        label_map = {0: "NESSUNO", 1: "LONG", 2: "SHORT"}
+        confidenza = float(proba[pred]) * 100
+
+        return label_map[pred], confidenza
+
+    except Exception as e:
+        print("Errore ML: {}".format(e))
+        return None, 0.0
+
+import pandas as pd
+
+# ---------------------------------------------------------
+# CONFIGURAZIONE
 # ---------------------------------------------------------
 SYMBOLS             = ["EUR/USD", "GBP/USD"]
 SALDO_INIZIALE      = 100.0
@@ -60,21 +158,20 @@ SESSIONI_OTTIMALI = [
     (16, 18),
 ]
 
-# CREDENZIALI INTEGRATE
-TELEGRAM_TOKEN      = "8661209874:AAH1x_HQWTo03WQe5fVt70KpBcsTpsFLbT0"
-TELEGRAM_CHAT_ID    = "6559735989"
-TWELVEDATA_API_KEY  = "f7ad19a1b160485cb773bacfad03543d"
+TELEGRAM_TOKEN     = "8661209874:AAHG2zvEDuSI-hXgJfYzCTo_pwtCgLBSsb4"
+TELEGRAM_CHAT_ID   = "6559735989"
+TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
-FILE_STORICO        = "storico_saldo.txt"
-FILE_STATO          = "stato_bot.json"
+FILE_STORICO = "storico_saldo.txt"
+FILE_STATO   = "stato_bot.json"
 
 # ---------------------------------------------------------
 # PERSISTENZA STATO
 # ---------------------------------------------------------
 def carica_stato():
     default = {
-        "saldo_virtuale": 107.89,
-        "stats": {"vinti": 18, "persi": 13, "pareggi": 0, "totali": 31}
+        "saldo_virtuale": 108.58,
+        "stats": {"vinti": 9, "persi": 12, "pareggi": 0, "totali": 21}
     }
     if os.path.exists(FILE_STATO):
         try:
@@ -95,10 +192,10 @@ _stato         = carica_stato()
 saldo_virtuale = _stato["saldo_virtuale"]
 stats          = _stato["stats"]
 
-last_update_id         = -1
-ultimo_heartbeat_ora   = -1
-macd_memoria           = {}
-pausa_bot_fino         = None
+last_update_id       = -1
+ultimo_heartbeat_ora = -1
+macd_memoria         = {}
+pausa_bot_fino       = None
 
 trade_attivo = {
     "aperto"              : False,
@@ -121,10 +218,10 @@ segnale_in_attesa = {
 
 if not os.path.exists(FILE_STORICO):
     with open(FILE_STORICO, "w") as f:
-        f.write("100.0\n107.89\n")
+        f.write("100.0\n108.58\n")
 
 # ---------------------------------------------------------
-# FUNZIONI TELEGRAM
+# TELEGRAM
 # ---------------------------------------------------------
 def send_telegram(msg):
     try:
@@ -171,7 +268,7 @@ def leggi_messaggio_telegram():
     return None
 
 # ---------------------------------------------------------
-# GRAFICI E REPORTISTICA
+# GRAFICO EQUITY
 # ---------------------------------------------------------
 def genera_e_invia_grafico(testo_report):
     if not HAS_MATPLOTLIB:
@@ -195,6 +292,9 @@ def genera_e_invia_grafico(testo_report):
     except:
         send_telegram(testo_report)
 
+# ---------------------------------------------------------
+# REPORT
+# ---------------------------------------------------------
 def invia_report():
     wr       = (stats["vinti"] / stats["totali"] * 100) if stats["totali"] > 0 else 0
     profitto = saldo_virtuale - SALDO_INIZIALE
@@ -217,6 +317,9 @@ def invia_report():
     )
     genera_e_invia_grafico(msg)
 
+# ---------------------------------------------------------
+# REGISTRA RISULTATO
+# ---------------------------------------------------------
 def registra_risultato(testo):
     global saldo_virtuale, stats, trade_attivo
     testo = testo.strip().replace(",", ".")
@@ -260,7 +363,7 @@ def registra_risultato(testo):
     return True
 
 # ---------------------------------------------------------
-# FILTRI TEMPORALI
+# CONTROLLI MERCATO
 # ---------------------------------------------------------
 def is_mercato_aperto():
     giorno = datetime.now().weekday()
@@ -290,7 +393,7 @@ def check_news_block():
     return False
 
 # ---------------------------------------------------------
-# RECUPERO DATI TWELVEDATA
+# FETCH DATI TWELVEDATA
 # ---------------------------------------------------------
 def fetch_candles(symbol, interval, outputsize=100):
     try:
@@ -302,11 +405,8 @@ def fetch_candles(symbol, interval, outputsize=100):
             "apikey"    : TWELVEDATA_API_KEY
         }
         r = requests.get(url, params=params, timeout=15).json()
-
         if "values" not in r:
-            print("TwelveData errore {}: {}".format(symbol, r.get("message", "?")))
             return None, None
-
         raw = list(reversed(r["values"]))
         candles = []
         for v in raw:
@@ -319,18 +419,16 @@ def fetch_candles(symbol, interval, outputsize=100):
                 })
             except:
                 continue
-
         closes = [c["close"] for c in candles]
         if len(closes) < outputsize * 0.6:
             return None, None
-
         return closes, candles
     except Exception as e:
         print("Errore fetch {}: {}".format(symbol, e))
         return None, None
 
 # ---------------------------------------------------------
-# CALCOLO INDICATORI MATEMATICI
+# INDICATORI
 # ---------------------------------------------------------
 def compute_ema(prices, period):
     if len(prices) < period:
@@ -347,13 +445,11 @@ def compute_macd_veloce(closes, symbol, fast=12, slow=26, signal=9):
     fast_ema  = compute_ema(closes, fast)
     slow_ema  = compute_ema(closes, slow)
     macd_line = fast_ema - slow_ema
-
     if symbol not in macd_memoria:
         macd_memoria[symbol] = []
     macd_memoria[symbol].append(macd_line)
     if len(macd_memoria[symbol]) > 50:
         macd_memoria[symbol].pop(0)
-
     signal_line = compute_ema(macd_memoria[symbol], signal)
     if signal_line is None:
         signal_line = macd_line
@@ -409,7 +505,6 @@ def detect_pattern(candles, direction, atr):
     corpo1     = abs(c1["close"] - c1["open"])
     ombra_sup1 = c1["high"] - max(c1["close"], c1["open"])
     ombra_inf1 = min(c1["close"], c1["open"]) - c1["low"]
-
     if direction == "LONG":
         if ombra_inf1 >= corpo1 * 2 and ombra_sup1 <= corpo1 * 0.5 and corpo1 >= atr * 0.1:
             return 3, "Hammer"
@@ -429,7 +524,7 @@ def detect_pattern(candles, direction, atr):
     return 0, "Nessun pattern"
 
 # ---------------------------------------------------------
-# ALGORITMO DI SELEZIONE MATRICE SCORE
+# MATRICE SCORE + ML
 # ---------------------------------------------------------
 def calcola_matrice(symbol):
     closes_15m, candles_15m = fetch_candles(symbol, "15min", outputsize=100)
@@ -455,9 +550,8 @@ def calcola_matrice(symbol):
 
     bb_upper, _, bb_lower = compute_bollinger(closes_15m)
     if bb_upper and bb_lower:
-        larghezza = (bb_upper - bb_lower) * 10000
-        if larghezza < 8.0:
-            return None, "BB Squeeze - volatilita troppo bassa"
+        if (bb_upper - bb_lower) * 10000 < 8.0:
+            return None, "BB Squeeze - volatilita bassa"
 
     direction = None
     if price > ema50_15m and price > ema50_1h:
@@ -468,13 +562,13 @@ def calcola_matrice(symbol):
     if direction is None:
         return None, "Trend 15m/1H non allineato"
 
-    if closes_4h and len(closes_4h) >= 20 and ema20_4h:
-        if direction == "LONG"  and price < ema20_4h: return None, "Bloccato: contro trend 4H"
-        if direction == "SHORT" and price > ema20_4h: return None, "Bloccato: contro trend 4H"
+    if ema20_4h:
+        if direction == "LONG"  and price < ema20_4h: return None, "Contro trend 4H"
+        if direction == "SHORT" and price > ema20_4h: return None, "Contro trend 4H"
 
     if ema200_1h:
-        if direction == "LONG"  and price < ema200_1h: return None, "Bloccato: sotto EMA200 H1"
-        if direction == "SHORT" and price > ema200_1h: return None, "Bloccato: sopra EMA200 H1"
+        if direction == "LONG"  and price < ema200_1h: return None, "Sotto EMA200 H1"
+        if direction == "SHORT" and price > ema200_1h: return None, "Sopra EMA200 H1"
 
     if direction == "LONG"  and rsi > 75: return None, "RSI ipercomprato {:.1f}".format(rsi)
     if direction == "SHORT" and rsi < 25: return None, "RSI ipervenduto {:.1f}".format(rsi)
@@ -513,14 +607,16 @@ def calcola_matrice(symbol):
         elif direction == "SHORT" and macd_hist < 0: macd_ok = True; macd_msg = "MACD ribassista"
         else: macd_msg = "MACD contro"
 
-    atr_mean = compute_atr(candles_15m[-50:], min(14, len(candles_15m)-1)) if len(candles_15m) >= 15 else atr
     punti_pattern, nome_pattern = detect_pattern(candles_15m, direction, atr)
     sess_ok, sess_nome          = in_sessione_ottimale()
     rr = pip_tp / pip_sl if pip_sl > 0 else 0
 
-    punti = 3  
+    # --- SCORE TECNICO ---
+    punti = 3  # base: trend + 4H + EMA200
 
-    r_atr = (atr / atr_mean) if atr_mean else 1
+    atr_mean = mean([compute_atr(candles_15m[max(0,i-14):i], 14) or atr
+                     for i in range(max(14, len(candles_15m)-30), len(candles_15m))])
+    r_atr = atr / (atr_mean + 1e-10)
     if r_atr >= 1.3:   punti += 3
     elif r_atr >= 1.1: punti += 2
     elif r_atr >= 0.9: punti += 1
@@ -536,19 +632,41 @@ def calcola_matrice(symbol):
     if sess_ok: punti += 2
     punti += punti_pattern
 
+    # --- PREDIZIONE ML ---
+    opens  = [c["open"]  for c in candles_15m]
+    highs  = [c["high"]  for c in candles_15m]
+    lows   = [c["low"]   for c in candles_15m]
+
+    ml_pred, ml_conf = predici_ml(closes_15m, highs, lows, opens)
+    ml_ok    = False
+    ml_bonus = 0
+    ml_msg   = "ML N/D"
+
+    if ml_pred is not None:
+        if ml_pred == direction and ml_conf >= 40:
+            ml_ok    = True
+            ml_bonus = 3 if ml_conf >= 60 else 2
+            ml_msg   = "ML {} {:.0f}% conf".format(ml_pred, ml_conf)
+            punti   += ml_bonus
+        elif ml_pred == "NESSUNO":
+            ml_msg = "ML: mercato laterale"
+        else:
+            ml_msg = "ML contro ({} {:.0f}%)".format(ml_pred, ml_conf)
+            punti -= 1  # penalita leggera se ML contrario
+
     if punti < SOGLIA_APPROVAZIONE:
         return None, "Score insufficiente ({} punti)".format(punti)
 
-    if punti >= 12:  score = "A+"; molt = 1.0
-    elif punti >= 8: score = "A";  molt = 0.75
-    else:            score = "B";  molt = 0.5
+    if punti >= 14:  score = "A+"; molt = 1.0
+    elif punti >= 10: score = "A";  molt = 0.75
+    else:             score = "B";  molt = 0.5
 
     if score == "B" and not sess_ok:
         return None, "Score B fuori sessione ottimale"
 
     rischio_eur  = saldo_virtuale * RISCHIO_BASE * molt
     guadagno_pot = rischio_eur * rr
-    units        = rischio_eur / (atr * 1.5) if atr > 0 else 1000
+    units        = rischio_eur / (atr * 1.5)
     std          = round(max(units / 100000, 0.01), 2)
     be_level     = price + atr * 1.25 if direction == "LONG" else price - atr * 1.25
 
@@ -573,6 +691,8 @@ def calcola_matrice(symbol):
         "bb_msg"      : bb_msg,
         "macd_msg"    : macd_msg,
         "pattern"     : nome_pattern,
+        "ml_msg"      : ml_msg,
+        "ml_ok"       : ml_ok,
         "sess_nome"   : sess_nome if sess_ok else "Sessione base",
         "supporto"    : supporto,
         "resistenza"  : resistenza
@@ -582,11 +702,13 @@ def calcola_matrice(symbol):
 # TELEMETRIA
 # ---------------------------------------------------------
 def genera_telemetria():
-    report = "*TELEMETRIA FILTRI*\n-------------------------\n"
+    report = "*TELEMETRIA FILTRI + ML*\n-------------------------\n"
+    report += "Modello ML: {}\n\n".format(
+        "Attivo" if ML_MODEL else "Non disponibile")
 
     if pausa_bot_fino and datetime.now() < pausa_bot_fino:
         minuti = int((pausa_bot_fino - datetime.now()).total_seconds() / 60)
-        report += "BOT IN PAUSA ({} min rimanenti)\n\n".format(minuti)
+        report += "BOT IN PAUSA ({} min)\n\n".format(minuti)
     elif segnale_in_attesa["attivo"]:
         report += "In attesa conferma entrata\n\n"
     elif trade_attivo["aperto"]:
@@ -606,16 +728,17 @@ def genera_telemetria():
                 "BB        : {}\n"
                 "MACD      : {}\n"
                 "Pattern   : {}\n"
+                "ML        : {}\n"
                 "Sessione  : {}\n\n"
             ).format(
                 result["direction"], result["punti"], result["score"],
                 result["rsi"], result["bb_msg"], result["macd_msg"],
-                result["pattern"], result["sess_nome"]
+                result["pattern"], result["ml_msg"], result["sess_nome"]
             )
     return report
 
 # ---------------------------------------------------------
-# INSEGUIMENTO PREZZO / MONITOR
+# MONITOR TRADE
 # ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
@@ -686,8 +809,8 @@ def monitora_trade():
             trade_attivo["be_fatto"] = True
             send_telegram(
                 "*BREAKEVEN ATTIVATO* - {}\n"
-                "SL spostato a entrata: `{:.5f}`\n"
-                "Profit attuale: +{:.1f} pip".format(symbol, entrata, abs(pip_profit)))
+                "SL a entrata: `{:.5f}`\n"
+                "Profit: +{:.1f} pip".format(symbol, entrata, abs(pip_profit)))
 
     if ora_entrata:
         minuti = (datetime.now() - ora_entrata).seconds // 60
@@ -695,10 +818,10 @@ def monitora_trade():
             send_telegram(
                 "*4 ORE APERTO* - {}\n"
                 "Loss: {:.1f} pip\n"
-                "Considera chiusura manuale".format(symbol, abs(pip_profit)))
+                "Considera chiusura".format(symbol, abs(pip_profit)))
 
 # ---------------------------------------------------------
-# CICLO DI ANALISI
+# ESEGUI ANALISI
 # ---------------------------------------------------------
 def esegui_analisi():
     global segnale_in_attesa
@@ -706,6 +829,7 @@ def esegui_analisi():
     if not is_mercato_aperto(): return
     if not is_sessione_base(): return
     if check_news_block():
+        send_telegram("*FILTRO NEWS*\nRicerca sospesa 15 min")
         return
     if trade_attivo["aperto"] or trade_attivo["in_attesa_risultato"]: return
     if segnale_in_attesa["attivo"]: return
@@ -719,7 +843,6 @@ def esegui_analisi():
 
         if signal is None:
             risultati.append("{} SKIP: {}".format(symbol, motivo))
-            print("SKIP: {}".format(motivo))
         else:
             score = signal["score"]
             if score == "A+":  label = "A+ ENTRA ORA"
@@ -727,9 +850,10 @@ def esegui_analisi():
             else:              label = "B VALUTA TU"
 
             direzione = "LONG (COMPRA)" if signal["direction"] == "LONG" else "SHORT (VENDI)"
+            ml_str    = "ML: {}".format(signal["ml_msg"]) if signal["ml_msg"] != "ML N/D" else ""
 
             msg = (
-                "*SEGNALE FOREX - {}*\n"
+                "*SEGNALE FOREX + ML - {}*\n"
                 "Score: *{}* ({} punti)\n"
                 "DIREZIONE: *{}*\n\n"
                 "Entrata  : `{:.5f}`\n"
@@ -743,9 +867,10 @@ def esegui_analisi():
                 "BB     : {}\n"
                 "MACD   : {}\n"
                 "Pattern: {}\n"
+                "{}"
                 "SR     : S={} R={}\n"
                 "Sessione: {}\n\n"
-                "Scrivi *Entrato* per attivare monitoraggio\n"
+                "Scrivi *Entrato* per attivare\n"
                 "Segnale scade in 5 minuti"
             ).format(
                 signal["symbol"], label, signal["punti"], direzione,
@@ -756,6 +881,7 @@ def esegui_analisi():
                 signal["size"], signal["rischio"], signal["guadagno"],
                 signal["rsi"], signal["bb_msg"], signal["macd_msg"],
                 signal["pattern"],
+                ml_str + "\n" if ml_str else "",
                 "{:.5f}".format(signal["supporto"]) if signal["supporto"] else "N/D",
                 "{:.5f}".format(signal["resistenza"]) if signal["resistenza"] else "N/D",
                 signal["sess_nome"]
@@ -769,8 +895,20 @@ def esegui_analisi():
             })
             return
 
+    stato = (
+        "*FOREX AI + ML - {}*\n"
+        "{}\n\n"
+        "{}\n\n"
+        "Nessun segnale - continuo a monitorare"
+    ).format(
+        datetime.now().strftime("%H:%M"),
+        "Sessione ottimale: {}".format(sess_nome) if sess_ok else "Sessione base",
+        "\n".join(risultati)
+    )
+    send_telegram(stato)
+
 # ---------------------------------------------------------
-# HEARTBEAT OGNI ORA
+# HEARTBEAT ORARIO
 # ---------------------------------------------------------
 def invia_heartbeat():
     global ultimo_heartbeat_ora
@@ -781,7 +919,7 @@ def invia_heartbeat():
     ultimo_heartbeat_ora = ora.hour
 
     sess_ok, sess_nome = in_sessione_ottimale()
-    stato_trade = "Trade aperto: *{}*".format(
+    stato_trade = "Trade: *{}*".format(
         trade_attivo["symbol"]) if trade_attivo["aperto"] else "Nessun trade aperto"
 
     if not is_mercato_aperto():
@@ -789,11 +927,14 @@ def invia_heartbeat():
             "*Heartbeat {:02d}:00*\n"
             "Mercato CHIUSO - Weekend\n"
             "{}\n"
-            "Saldo: *{:.2f} EUR*".format(ora.hour, stato_trade, saldo_virtuale))
+            "Saldo: *{:.2f} EUR*\n"
+            "ML: {}".format(
+                ora.hour, stato_trade, saldo_virtuale,
+                "Attivo" if ML_MODEL else "Non disponibile"))
     elif not is_sessione_base():
         send_telegram(
             "*Heartbeat {:02d}:00*\n"
-            "Fuori sessione operativa\n"
+            "Fuori sessione\n"
             "{}\n"
             "Saldo: *{:.2f} EUR*".format(ora.hour, stato_trade, saldo_virtuale))
     else:
@@ -801,33 +942,49 @@ def invia_heartbeat():
             "*Heartbeat {:02d}:00*\n"
             "{}\n"
             "{}\n"
-            "Saldo: *{:.2f} EUR*\n\n"
+            "Saldo: *{:.2f} EUR*\n"
+            "ML: {}\n\n"
             "Scrivi *filtri* per telemetria".format(
                 ora.hour,
-                "Sessione ottimale: {}".format(sess_nome) if sess_ok else "Sessione base attiva",
+                "Sessione ottimale: {}".format(sess_nome) if sess_ok else "Sessione base",
                 stato_trade,
-                saldo_virtuale))
+                saldo_virtuale,
+                "Attivo" if ML_MODEL else "Non disponibile"))
 
 # ---------------------------------------------------------
-# MAIN LOOP
+# BOT LOOP
 # ---------------------------------------------------------
 def bot_loop():
-    global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale, stats
+    global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale
 
-    print("FOREX ENGINE AVVIATO SU RENDER (TWELVEDATA)")
+    print("FOREX ENGINE + ML AVVIATO")
+    ml_ok = carica_modello()
 
     send_telegram(
-        "*FOREX ENGINE AVVIATO*\n"
+        "*FOREX ENGINE + ML AVVIATO*\n"
         "*Render Cloud 24/7*\n\n"
         "Saldo: *{:.2f} EUR*\n"
         "Win Rate: *{:.1f}%* ({} trade)\n\n"
-        "Comandi disponibili:\n"
-        "• Entrato → conferma trade\n"
-        "• filtri → telemetria\n"
-        "• pausa / riprendi → gestione analisi\n"
-        "• saldo X.XX → imposta nuovo saldo\n"
-        "• stats V P PA → imposta vinti/persi/pareggi (es: stats 19 13 0)\n"
-        "• +X.XX / -X.XX → registra esito singolo trade"
+        "Filtri tecnici:\n"
+        "EMA 15m + 1H + 4H + EMA200\n"
+        "RSI + Bollinger + MACD\n"
+        "Pattern candele + SR\n"
+        "BB Squeeze filter\n\n"
+        "Modello ML: {}\n"
+        "XGBoost addestrato su dati storici\n"
+        "Aggiunge fino a +3 punti allo score\n\n"
+        "Comandi:\n"
+        "Entrato/ok → conferma trade\n"
+        "filtri/stato → telemetria\n"
+        "pausa → sospendi 2 ore\n"
+        "riprendi → riattiva\n"
+        "saldo X.XX → aggiorna saldo\n"
+        "+X.XX/-X.XX → registra risultato".format(
+            saldo_virtuale,
+            stats["vinti"] / stats["totali"] * 100 if stats["totali"] > 0 else 0,
+            stats["totali"],
+            "Attivo" if ml_ok else "Non disponibile"
+        )
     )
     invia_report()
 
@@ -838,7 +995,7 @@ def bot_loop():
             if segnale_in_attesa["attivo"]:
                 if time.time() - segnale_in_attesa["timestamp_generazione"] > TIMEOUT_SEGNALE_SEC:
                     sym = segnale_in_attesa["data_trade"]["symbol"]
-                    send_telegram("*Segnale expired* - {}. Scaduto.".format(sym))
+                    send_telegram("*Segnale scaduto* - {}\nRiprendo ricerca.".format(sym))
                     segnale_in_attesa["attivo"] = False
 
             msg_in = leggi_messaggio_telegram()
@@ -851,48 +1008,23 @@ def bot_loop():
 
                 if parola in ["pausa", "sospendi"]:
                     pausa_bot_fino = datetime.now() + timedelta(hours=2)
-                    send_telegram("⏸️ *Analisi sospesa per 2 ore*.")
+                    send_telegram("Bot in pausa per 2 ore.")
                     continue
 
                 if parola in ["riprendi", "attiva"]:
                     pausa_bot_fino = None
-                    send_telegram("▶️ *Analisi ripresa immediatamente*.")
+                    send_telegram("Bot riattivato.")
                     continue
 
-                # COMANDO IMPOSTA SALDO
                 if parola.startswith("saldo "):
                     try:
-                        saldo_virtuale = float(parola.split()[1].replace(",", "."))
+                        nuovo_s = float(parola.split()[1].replace(",", "."))
+                        saldo_virtuale = nuovo_s
                         salva_stato()
-                        send_telegram("💰 Saldo aggiornato: {:.2f} EUR".format(saldo_virtuale))
+                        send_telegram("Saldo: *{:.2f} EUR*".format(saldo_virtuale))
                         invia_report()
                     except:
-                        send_telegram("⚠️ Formato errato. Usa: `saldo 110.50`")
-                    continue
-
-                # NUOVO COMANDO IMPOSTA STATS (vinti, persi, pareggi)
-                if parola.startswith("stats "):
-                    try:
-                        parti = parola.split()
-                        vinti = int(parti[1])
-                        persi = int(parti[2])
-                        pareggi = int(parti[3]) if len(parti) > 3 else 0
-
-                        stats["vinti"] = vinti
-                        stats["persi"] = persi
-                        stats["pareggi"] = pareggi
-                        stats["totali"] = vinti + persi + pareggi
-                        
-                        salva_stato()
-                        send_telegram(
-                            "📊 *Statistiche Aggiornate Manualmente*\n"
-                            "Vinti: {}\nPersi: {}\nPareggi: {}\nTotali: {}".format(
-                                vinti, persi, pareggi, stats["totali"]
-                            )
-                        )
-                        invia_report()
-                    except:
-                        send_telegram("⚠️ Formato errato. Usa: `stats 19 13 0` (Vinti Persi Pareggi)")
+                        send_telegram("Usa: saldo 105.50")
                     continue
 
                 if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
@@ -910,11 +1042,27 @@ def bot_loop():
                         "in_attesa_risultato" : False
                     })
                     segnale_in_attesa["attivo"] = False
-                    send_telegram("🚀 Trade registrato su {}. Inseguimento attivo.".format(dt["symbol"]))
+                    send_telegram(
+                        "*Trade attivato!*\n"
+                        "{} {}\n"
+                        "Monitor ogni {} min\n\n"
+                        "Quando chiudi scrivi:\n"
+                        "+X.XX guadagno\n"
+                        "-X.XX perdita\n"
+                        "0 pareggio".format(dt["symbol"], dt["direction"], MONITOR_MIN))
                     continue
 
-                if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
-                    registra_risultato(msg_in)
+                if not msg_in.startswith("/"):
+                    if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
+                        registra_risultato(msg_in)
+                    else:
+                        send_telegram(
+                            "Sono online!\n"
+                            "Saldo: *{:.2f} EUR*\n"
+                            "ML: {}\n"
+                            "Scrivi *filtri* per lo stato".format(
+                                saldo_virtuale,
+                                "Attivo" if ML_MODEL else "Non disponibile"))
                     continue
 
             if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
@@ -922,14 +1070,23 @@ def bot_loop():
                 time.sleep(MONITOR_MIN * 60)
             else:
                 esegui_analisi()
-                time.sleep(60)
+                time.sleep(15 * 60)
 
         except Exception as e:
-            print("Errore nel loop: {}".format(e))
-            time.sleep(10)
+            print("Errore loop: {}".format(e))
+            send_telegram("Errore: {} - riavvio...".format(str(e)[:50]))
+            time.sleep(30)
 
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
 if __name__ == "__main__":
     t = Thread(target=bot_loop)
     t.daemon = True
-    t.start()
+
+    def avvio_ritardato():
+        time.sleep(2)
+        t.start()
+
+    Thread(target=avvio_ritardato).start()
     run_flask()
