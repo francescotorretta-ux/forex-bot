@@ -1,6 +1,6 @@
+flask
 requests
 matplotlib
-Flask
 xgboost
 scikit-learn
 numpy
