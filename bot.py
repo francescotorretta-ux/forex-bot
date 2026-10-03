@@ -4,6 +4,7 @@ import os
 import json
 import pickle
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from threading import Thread
@@ -19,7 +20,7 @@ def home():
     ora = datetime.now().strftime("%H:%M:%S")
     wr  = (stats["vinti"] / stats["totali"] * 100) if stats["totali"] > 0 else 0
     return (
-        "FOREX BOT + ML ONLINE\n"
+        "FOREX AGENT ONLINE\n"
         "Ora: {}\n"
         "Saldo: {:.2f} EUR\n"
         "Win Rate: {:.1f}%\n"
@@ -53,9 +54,9 @@ def carica_modello():
     global ML_MODEL, ML_FEATURES
     try:
         with open("forex_model.pkl", "rb") as f:
-            data = pickle.load(f)
-        ML_MODEL    = data["model"]
-        ML_FEATURES = data["features"]
+            data        = pickle.load(f)
+            ML_MODEL    = data["model"]
+            ML_FEATURES = data["features"]
         print("Modello ML caricato")
         return True
     except Exception as e:
@@ -65,22 +66,7 @@ def carica_modello():
 def predici_ml(closes, highs, lows, opens):
     if ML_MODEL is None or len(closes) < 30:
         return None, 0.0
-
     try:
-        def ema(series, period):
-            s = pd.Series(series)
-            return s.ewm(span=period, adjust=False).mean().iloc[-1]
-
-        def rsi(series, period=14):
-            s = pd.Series(series)
-            delta = s.diff()
-            gain  = delta.clip(lower=0).rolling(period).mean()
-            loss  = (-delta.clip(upper=0)).rolling(period).mean()
-            rs    = gain / (loss + 1e-10)
-            return (100 - (100 / (1 + rs))).iloc[-1]
-
-        import pandas as pd
-
         c = pd.Series(closes)
         h = pd.Series(highs)
         l = pd.Series(lows)
@@ -89,55 +75,48 @@ def predici_ml(closes, highs, lows, opens):
         ema50  = c.ewm(span=50,  adjust=False).mean().iloc[-1]
         ema200 = c.ewm(span=200, adjust=False).mean().iloc[-1] if len(closes) >= 200 else ema50
 
-        rsi_val = rsi(closes)
+        delta  = c.diff()
+        gain   = delta.clip(lower=0).rolling(14).mean()
+        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+        rs     = gain / (loss + 1e-10)
+        rsi_val = float((100 - (100 / (1 + rs))).iloc[-1])
 
-        ema12 = c.ewm(span=12, adjust=False).mean()
-        ema26 = c.ewm(span=26, adjust=False).mean()
-        macd_l = ema12 - ema26
-        macd_s = macd_l.ewm(span=9, adjust=False).mean()
-        macd_h = (macd_l - macd_s).iloc[-1]
+        ema12   = c.ewm(span=12, adjust=False).mean()
+        ema26   = c.ewm(span=26, adjust=False).mean()
+        macd_l  = ema12 - ema26
+        macd_s  = macd_l.ewm(span=9, adjust=False).mean()
+        macd_h  = float((macd_l - macd_s).iloc[-1])
 
-        ma20   = c.rolling(20).mean()
-        sd20   = c.rolling(20).std()
-        bb_up  = (ma20 + 2*sd20).iloc[-1]
-        bb_lo  = (ma20 - 2*sd20).iloc[-1]
-        bb_w   = (bb_up - bb_lo) / (ma20.iloc[-1] + 1e-10) * 100
-        bb_pos = (closes[-1] - bb_lo) / (bb_up - bb_lo + 1e-10)
+        ma20    = c.rolling(20).mean()
+        sd20    = c.rolling(20).std()
+        bb_up   = float((ma20 + 2*sd20).iloc[-1])
+        bb_lo   = float((ma20 - 2*sd20).iloc[-1])
+        bb_w    = (bb_up - bb_lo) / (float(ma20.iloc[-1]) + 1e-10) * 100
+        bb_pos  = (closes[-1] - bb_lo) / (bb_up - bb_lo + 1e-10)
 
-        tr = pd.concat([
-            h - l,
-            (h - c.shift()).abs(),
-            (l - c.shift()).abs()
-        ], axis=1).max(axis=1)
-        atr_val  = tr.rolling(14).mean().iloc[-1]
-        atr_mean = tr.rolling(14).mean().rolling(30).mean().iloc[-1]
-        vol_rat  = atr_val / (atr_mean + 1e-10)
+        tr      = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+        atr_s   = tr.rolling(14).mean()
+        atr_val = float(atr_s.iloc[-1])
+        atr_m   = float(atr_s.rolling(30).mean().iloc[-1])
+        vol_rat = atr_val / (atr_m + 1e-10)
 
         p_ema50  = (closes[-1] - ema50)  / (atr_val + 1e-10)
         p_ema200 = (closes[-1] - ema200) / (atr_val + 1e-10)
         body     = (closes[-1] - opens[-1]) / (atr_val + 1e-10)
-        mom3     = (closes[-1] / closes[-4] - 1) * 100 if len(closes) >= 4 else 0
+        mom3     = (closes[-1] / closes[-4]  - 1) * 100 if len(closes) >= 4  else 0
         mom10    = (closes[-1] / closes[-11] - 1) * 100 if len(closes) >= 11 else 0
 
-        X = np.array([[
-            rsi_val, macd_h, bb_w, bb_pos,
-            p_ema50, p_ema200,
-            body, mom3, mom10, vol_rat
-        ]])
+        X = np.array([[rsi_val, macd_h, bb_w, bb_pos,
+                        p_ema50, p_ema200,
+                        body, mom3, mom10, vol_rat]])
 
         proba = ML_MODEL.predict_proba(X)[0]
-        pred  = ML_MODEL.predict(X)[0]
-
+        pred  = int(ML_MODEL.predict(X)[0])
         label_map = {0: "NESSUNO", 1: "LONG", 2: "SHORT"}
-        confidenza = float(proba[pred]) * 100
-
-        return label_map[pred], confidenza
-
+        return label_map[pred], float(proba[pred]) * 100
     except Exception as e:
         print("Errore ML: {}".format(e))
         return None, 0.0
-
-import pandas as pd
 
 # ---------------------------------------------------------
 # CONFIGURAZIONE
@@ -207,7 +186,9 @@ trade_attivo = {
     "be_fatto"            : False,
     "ora_entrata"         : None,
     "atr"                 : 0.0015,
-    "in_attesa_risultato" : False
+    "size"                : 0.01,
+    "in_attesa_risultato" : False,
+    "step"                : None
 }
 
 segnale_in_attesa = {
@@ -358,8 +339,9 @@ def registra_risultato(testo):
         "Saldo: *{:.2f} EUR*".format(segno, profit, emoji, saldo_virtuale))
     invia_report()
 
-    trade_attivo["aperto"] = False
+    trade_attivo["aperto"]              = False
     trade_attivo["in_attesa_risultato"] = False
+    trade_attivo["step"]                = None
     return True
 
 # ---------------------------------------------------------
@@ -611,11 +593,10 @@ def calcola_matrice(symbol):
     sess_ok, sess_nome          = in_sessione_ottimale()
     rr = pip_tp / pip_sl if pip_sl > 0 else 0
 
-    # --- SCORE TECNICO ---
-    punti = 3  # base: trend + 4H + EMA200
-
-    atr_mean = mean([compute_atr(candles_15m[max(0,i-14):i], 14) or atr
-                     for i in range(max(14, len(candles_15m)-30), len(candles_15m))])
+    punti = 3
+    atr_list = [compute_atr(candles_15m[max(0,i-14):i], 14) or atr
+                for i in range(max(14, len(candles_15m)-30), len(candles_15m))]
+    atr_mean = mean(atr_list) if atr_list else atr
     r_atr = atr / (atr_mean + 1e-10)
     if r_atr >= 1.3:   punti += 3
     elif r_atr >= 1.1: punti += 2
@@ -632,32 +613,26 @@ def calcola_matrice(symbol):
     if sess_ok: punti += 2
     punti += punti_pattern
 
-    # --- PREDIZIONE ML ---
-    opens  = [c["open"]  for c in candles_15m]
-    highs  = [c["high"]  for c in candles_15m]
-    lows   = [c["low"]   for c in candles_15m]
-
+    opens = [c["open"] for c in candles_15m]
+    highs = [c["high"] for c in candles_15m]
+    lows  = [c["low"]  for c in candles_15m]
     ml_pred, ml_conf = predici_ml(closes_15m, highs, lows, opens)
-    ml_ok    = False
-    ml_bonus = 0
-    ml_msg   = "ML N/D"
-
+    ml_msg = "ML N/D"
     if ml_pred is not None:
         if ml_pred == direction and ml_conf >= 40:
-            ml_ok    = True
             ml_bonus = 3 if ml_conf >= 60 else 2
-            ml_msg   = "ML {} {:.0f}% conf".format(ml_pred, ml_conf)
             punti   += ml_bonus
+            ml_msg   = "ML {} {:.0f}%".format(ml_pred, ml_conf)
         elif ml_pred == "NESSUNO":
-            ml_msg = "ML: mercato laterale"
+            ml_msg = "ML: laterale"
         else:
+            punti -= 1
             ml_msg = "ML contro ({} {:.0f}%)".format(ml_pred, ml_conf)
-            punti -= 1  # penalita leggera se ML contrario
 
     if punti < SOGLIA_APPROVAZIONE:
         return None, "Score insufficiente ({} punti)".format(punti)
 
-    if punti >= 14:  score = "A+"; molt = 1.0
+    if punti >= 14:   score = "A+"; molt = 1.0
     elif punti >= 10: score = "A";  molt = 0.75
     else:             score = "B";  molt = 0.5
 
@@ -692,27 +667,110 @@ def calcola_matrice(symbol):
         "macd_msg"    : macd_msg,
         "pattern"     : nome_pattern,
         "ml_msg"      : ml_msg,
-        "ml_ok"       : ml_ok,
         "sess_nome"   : sess_nome if sess_ok else "Sessione base",
         "supporto"    : supporto,
         "resistenza"  : resistenza
     }, "OK"
 
 # ---------------------------------------------------------
+# ISTRUZIONI MT5 STEP BY STEP
+# ---------------------------------------------------------
+def invia_istruzioni_entrata(signal):
+    direzione = "LONG" if signal["direction"] == "LONG" else "SHORT"
+    azione    = "COMPRA (Buy)" if direzione == "LONG" else "VENDI (Sell)"
+    colore    = "BLU" if direzione == "LONG" else "ROSSO"
+
+    msg = (
+        "*AGENTE - ISTRUZIONI ENTRATA*\n"
+        "Segui questi passi su MT5:\n\n"
+        "*STEP 1 - Apri nuovo ordine*\n"
+        "Premi F9 oppure clicca\n"
+        "'Crea Nuovo Ordine'\n\n"
+        "*STEP 2 - Imposta i valori*\n"
+        "Simbolo : *{}*\n"
+        "Volume  : *{}* lotti\n"
+        "S/L     : *{:.5f}*\n"
+        "T/P     : *{:.5f}*\n\n"
+        "*STEP 3 - Esegui*\n"
+        "Clicca il pulsante *{}* ({})\n\n"
+        "Prezzo attuale: `{:.5f}`\n"
+        "Rischio: -{:.2f} EUR\n"
+        "Obiettivo: +{:.2f} EUR\n\n"
+        "Quando sei entrato scrivi *Entrato*"
+    ).format(
+        signal["symbol"].replace("/", ""),
+        signal["size"],
+        signal["sl"],
+        signal["tp"],
+        azione, colore,
+        signal["price"],
+        signal["rischio"],
+        signal["guadagno"]
+    )
+    send_telegram(msg)
+
+def invia_istruzioni_trailing(symbol, vecchio_sl, nuovo_sl):
+    msg = (
+        "*AGENTE - AGGIORNA STOP LOSS*\n\n"
+        "Il trailing stop si e spostato!\n\n"
+        "*Come aggiornare su MT5:*\n"
+        "1. Vai in basso nel pannello ordini\n"
+        "2. Clicca destro sul trade aperto\n"
+        "3. Seleziona 'Modifica ordine'\n"
+        "4. Cambia S/L da `{:.5f}`\n"
+        "   a *{:.5f}*\n"
+        "5. Clicca 'Modifica'\n\n"
+        "Questo protegge il tuo profitto!"
+    ).format(vecchio_sl, nuovo_sl)
+    send_telegram(msg)
+
+def invia_istruzioni_breakeven(symbol, entrata):
+    msg = (
+        "*AGENTE - METTI IN BREAKEVEN*\n\n"
+        "Hai raggiunto il 50% del TP!\n"
+        "Proteggi il trade:\n\n"
+        "*Come fare su MT5:*\n"
+        "1. Clicca destro sul trade\n"
+        "2. Seleziona 'Modifica ordine'\n"
+        "3. Cambia S/L a *{:.5f}*\n"
+        "   (uguale al prezzo di entrata)\n"
+        "4. Clicca 'Modifica'\n\n"
+        "Ora il trade non puo andare in perdita!\n\n"
+        "Il prezzo ha rotto un massimo/minimo?\n"
+        "SI  → sposta subito\n"
+        "NO  → aspetta conferma"
+    ).format(entrata)
+    send_telegram(msg)
+
+def invia_istruzioni_chiusura(symbol, direction, motivo):
+    msg = (
+        "*AGENTE - CHIUDI IL TRADE*\n\n"
+        "Motivo: {}\n\n"
+        "*Come chiudere su MT5:*\n"
+        "1. Vai nel pannello ordini in basso\n"
+        "2. Clicca la X accanto al trade {}\n"
+        "3. Conferma la chiusura\n\n"
+        "Poi scrivi il risultato qui:\n"
+        "+X.XX se guadagno\n"
+        "-X.XX se perdita\n"
+        "0 se pareggio"
+    ).format(motivo, symbol.replace("/", ""))
+    send_telegram(msg)
+
+# ---------------------------------------------------------
 # TELEMETRIA
 # ---------------------------------------------------------
 def genera_telemetria():
-    report = "*TELEMETRIA FILTRI + ML*\n-------------------------\n"
-    report += "Modello ML: {}\n\n".format(
-        "Attivo" if ML_MODEL else "Non disponibile")
+    report = "*TELEMETRIA AGENTE + ML*\n-------------------------\n"
+    report += "ML: {}\n\n".format("Attivo" if ML_MODEL else "Non disponibile")
 
     if pausa_bot_fino and datetime.now() < pausa_bot_fino:
         minuti = int((pausa_bot_fino - datetime.now()).total_seconds() / 60)
-        report += "BOT IN PAUSA ({} min)\n\n".format(minuti)
+        report += "PAUSA ({} min rimanenti)\n\n".format(minuti)
     elif segnale_in_attesa["attivo"]:
         report += "In attesa conferma entrata\n\n"
     elif trade_attivo["aperto"]:
-        report += "Trade aperto su {}\n\n".format(trade_attivo["symbol"])
+        report += "Trade aperto: {}\n\n".format(trade_attivo["symbol"])
 
     for symbol in SYMBOLS:
         result, motivo = calcola_matrice(symbol)
@@ -738,7 +796,7 @@ def genera_telemetria():
     return report
 
 # ---------------------------------------------------------
-# MONITOR TRADE
+# MONITOR TRADE - AGENTE GUIDA OGNI STEP
 # ---------------------------------------------------------
 def monitora_trade():
     global trade_attivo
@@ -762,63 +820,93 @@ def monitora_trade():
     pip_profit = (prezzo - entrata) * 10000 if direction == "LONG" else (entrata - prezzo) * 10000
     print("Monitor {}: {:.5f} | {:+.1f} pip".format(symbol, prezzo, pip_profit))
 
+    # TP raggiunto
     if (direction == "LONG" and prezzo >= tp) or (direction == "SHORT" and prezzo <= tp):
+        invia_istruzioni_chiusura(symbol, direction, "TARGET RAGGIUNTO!")
         send_telegram(
-            "*TRADE CHIUSO IN PROFIT!*\n"
-            "{} {} | +{:.1f} pip\n\n"
-            "Scrivi il guadagno:\n"
-            "+2.50 oppure 2.50".format(symbol, direction, abs(pip_profit)))
+            "*PROFIT!* +{:.1f} pip\n\n"
+            "Dopo aver chiuso scrivi il guadagno:\n"
+            "Esempio: +2.50".format(abs(pip_profit)))
         trade_attivo["in_attesa_risultato"] = True
         return
 
+    # SL raggiunto
     if (direction == "LONG" and prezzo <= sl - 0.00005) or \
        (direction == "SHORT" and prezzo >= sl + 0.00005):
         send_telegram(
-            "*TRADE CHIUSO IN LOSS*\n"
-            "{} {} | {:.1f} pip\n\n"
-            "Scrivi la perdita:\n"
-            "-1.50".format(symbol, direction, abs(pip_profit)))
+            "*STOP LOSS COLPITO* su {}\n"
+            "Loss: {:.1f} pip\n\n"
+            "Il trade e gia chiuso automaticamente\n"
+            "da MT5. Scrivi la perdita:\n"
+            "Esempio: -1.50".format(symbol, abs(pip_profit)))
         trade_attivo["in_attesa_risultato"] = True
         return
 
+    # trailing stop
     if pip_profit > 0:
         if direction == "LONG":
             nuovo_sl = prezzo - atr * 1.5
             if nuovo_sl > trade_attivo["sl"] and nuovo_sl > entrata:
                 vecchio = trade_attivo["sl"]
                 trade_attivo["sl"] = nuovo_sl
-                send_telegram(
-                    "*TRAILING STOP* - {}\n"
-                    "SL: `{:.5f}` -> `{:.5f}`\n"
-                    "Aggiorna su MT5!".format(symbol, vecchio, nuovo_sl))
+                invia_istruzioni_trailing(symbol, vecchio, nuovo_sl)
         elif direction == "SHORT":
             nuovo_sl = prezzo + atr * 1.5
             if nuovo_sl < trade_attivo["sl"] and nuovo_sl < entrata:
                 vecchio = trade_attivo["sl"]
                 trade_attivo["sl"] = nuovo_sl
-                send_telegram(
-                    "*TRAILING STOP* - {}\n"
-                    "SL: `{:.5f}` -> `{:.5f}`\n"
-                    "Aggiorna su MT5!".format(symbol, vecchio, nuovo_sl))
+                invia_istruzioni_trailing(symbol, vecchio, nuovo_sl)
 
+    # breakeven
     if not trade_attivo["be_fatto"]:
         be_level = entrata + atr * 1.25 if direction == "LONG" else entrata - atr * 1.25
         if (direction == "LONG" and prezzo >= be_level) or \
            (direction == "SHORT" and prezzo <= be_level):
             trade_attivo["sl"]       = entrata
             trade_attivo["be_fatto"] = True
-            send_telegram(
-                "*BREAKEVEN ATTIVATO* - {}\n"
-                "SL a entrata: `{:.5f}`\n"
-                "Profit: +{:.1f} pip".format(symbol, entrata, abs(pip_profit)))
+            invia_istruzioni_breakeven(symbol, entrata)
 
+    # inversione
+    closes_15m, candles_15m = fetch_candles(symbol, "15min", outputsize=20)
+    if closes_15m and len(closes_15m) >= 3:
+        rsi    = compute_rsi(closes_15m)
+        c1     = candles_15m[-2]
+        c2     = candles_15m[-3]
+        inv = False; motivo_inv = ""
+        if direction == "LONG":
+            if rsi > 72: inv = True; motivo_inv = "RSI ipercomprato {:.1f}".format(rsi)
+            elif c1["close"] < c1["open"] and c2["close"] < c2["open"]:
+                inv = True; motivo_inv = "2 candele ribassiste"
+        elif direction == "SHORT":
+            if rsi < 28: inv = True; motivo_inv = "RSI ipervenduto {:.1f}".format(rsi)
+            elif c1["close"] > c1["open"] and c2["close"] > c2["open"]:
+                inv = True; motivo_inv = "2 candele rialziste"
+
+        if inv:
+            if pip_profit > 0:
+                invia_istruzioni_chiusura(symbol, direction,
+                    "Possibile inversione: {}".format(motivo_inv))
+                send_telegram(
+                    "Sei in profitto di {:.1f} pip\n"
+                    "Valuta se chiudere ora per proteggere\n"
+                    "oppure aspetta lo SL/TP automatico".format(abs(pip_profit)))
+            else:
+                send_telegram(
+                    "*Possibile inversione* su {}\n"
+                    "Motivo: {}\n"
+                    "Sei in perdita - aspetta SL automatico\n"
+                    "Non chiudere manualmente".format(symbol, motivo_inv))
+
+    # 4 ore
     if ora_entrata:
         minuti = (datetime.now() - ora_entrata).seconds // 60
         if minuti >= 240 and pip_profit <= 0:
+            invia_istruzioni_chiusura(symbol, direction,
+                "Trade aperto da 4 ore senza profitto")
             send_telegram(
-                "*4 ORE APERTO* - {}\n"
-                "Loss: {:.1f} pip\n"
-                "Considera chiusura".format(symbol, abs(pip_profit)))
+                "Loss attuale: {:.1f} pip\n"
+                "Ti conviene chiudere manualmente\n"
+                "per limitare le perdite".format(abs(pip_profit)))
 
 # ---------------------------------------------------------
 # ESEGUI ANALISI
@@ -845,48 +933,45 @@ def esegui_analisi():
             risultati.append("{} SKIP: {}".format(symbol, motivo))
         else:
             score = signal["score"]
-            if score == "A+":  label = "A+ ENTRA ORA"
-            elif score == "A": label = "A ENTRA ORA"
-            else:              label = "B VALUTA TU"
+            if score == "A+":  label = "A+ - SEGNALE FORTE"
+            elif score == "A": label = "A - SEGNALE BUONO"
+            else:              label = "B - VALUTA TU"
 
             direzione = "LONG (COMPRA)" if signal["direction"] == "LONG" else "SHORT (VENDI)"
-            ml_str    = "ML: {}".format(signal["ml_msg"]) if signal["ml_msg"] != "ML N/D" else ""
 
-            msg = (
-                "*SEGNALE FOREX + ML - {}*\n"
+            # primo messaggio - analisi
+            msg_analisi = (
+                "*AGENTE - SEGNALE TROVATO*\n"
                 "Score: *{}* ({} punti)\n"
+                "Asset: *{}*\n"
                 "DIREZIONE: *{}*\n\n"
-                "Entrata  : `{:.5f}`\n"
-                "Stop Loss: `{:.5f}` ({:.1f} pip)\n"
-                "Take Prof: `{:.5f}` ({:.1f} pip)\n"
-                "R/R      : 1:{:.2f}\n\n"
-                "Size     : {} lotti\n"
+                "Prezzo attuale: `{:.5f}`\n"
+                "Stop Loss     : `{:.5f}` ({:.1f} pip)\n"
+                "Take Profit   : `{:.5f}` ({:.1f} pip)\n"
+                "R/R           : 1:{:.2f}\n\n"
                 "Rischio  : -{:.2f} EUR\n"
-                "Guadagno : +{:.2f} EUR\n\n"
+                "Obiettivo: +{:.2f} EUR\n\n"
                 "RSI    : {:.1f}\n"
                 "BB     : {}\n"
                 "MACD   : {}\n"
                 "Pattern: {}\n"
-                "{}"
-                "SR     : S={} R={}\n"
+                "ML     : {}\n"
                 "Sessione: {}\n\n"
-                "Scrivi *Entrato* per attivare\n"
+                "Vuoi entrare? Scrivi *si* per le istruzioni\n"
+                "oppure *no* per saltare\n"
                 "Segnale scade in 5 minuti"
             ).format(
-                signal["symbol"], label, signal["punti"], direzione,
+                label, signal["punti"],
+                signal["symbol"], direzione,
                 signal["price"],
                 signal["sl"], signal["pip_sl"],
                 signal["tp"], signal["pip_tp"],
                 signal["rr"],
-                signal["size"], signal["rischio"], signal["guadagno"],
+                signal["rischio"], signal["guadagno"],
                 signal["rsi"], signal["bb_msg"], signal["macd_msg"],
-                signal["pattern"],
-                ml_str + "\n" if ml_str else "",
-                "{:.5f}".format(signal["supporto"]) if signal["supporto"] else "N/D",
-                "{:.5f}".format(signal["resistenza"]) if signal["resistenza"] else "N/D",
-                signal["sess_nome"]
+                signal["pattern"], signal["ml_msg"], signal["sess_nome"]
             )
-            send_telegram(msg)
+            send_telegram(msg_analisi)
 
             segnale_in_attesa.update({
                 "attivo"               : True,
@@ -896,10 +981,10 @@ def esegui_analisi():
             return
 
     stato = (
-        "*FOREX AI + ML - {}*\n"
+        "*AGENTE - {]*\n"
         "{}\n\n"
         "{}\n\n"
-        "Nessun segnale - continuo a monitorare"
+        "Nessun segnale - prossima analisi tra 15 min"
     ).format(
         datetime.now().strftime("%H:%M"),
         "Sessione ottimale: {}".format(sess_nome) if sess_ok else "Sessione base",
@@ -913,33 +998,29 @@ def esegui_analisi():
 def invia_heartbeat():
     global ultimo_heartbeat_ora
     ora = datetime.now()
-
     if ora.hour == ultimo_heartbeat_ora:
         return
     ultimo_heartbeat_ora = ora.hour
 
     sess_ok, sess_nome = in_sessione_ottimale()
     stato_trade = "Trade: *{}*".format(
-        trade_attivo["symbol"]) if trade_attivo["aperto"] else "Nessun trade aperto"
+        trade_attivo["symbol"]) if trade_attivo["aperto"] else "Nessun trade"
 
     if not is_mercato_aperto():
         send_telegram(
-            "*Heartbeat {:02d}:00*\n"
+            "*Agente {:02d}:00*\n"
             "Mercato CHIUSO - Weekend\n"
             "{}\n"
-            "Saldo: *{:.2f} EUR*\n"
-            "ML: {}".format(
-                ora.hour, stato_trade, saldo_virtuale,
-                "Attivo" if ML_MODEL else "Non disponibile"))
+            "Saldo: *{:.2f} EUR*".format(ora.hour, stato_trade, saldo_virtuale))
     elif not is_sessione_base():
         send_telegram(
-            "*Heartbeat {:02d}:00*\n"
+            "*Agente {:02d}:00*\n"
             "Fuori sessione\n"
             "{}\n"
             "Saldo: *{:.2f} EUR*".format(ora.hour, stato_trade, saldo_virtuale))
     else:
         send_telegram(
-            "*Heartbeat {:02d}:00*\n"
+            "*Agente {:02d}:00*\n"
             "{}\n"
             "{}\n"
             "Saldo: *{:.2f} EUR*\n"
@@ -949,7 +1030,7 @@ def invia_heartbeat():
                 "Sessione ottimale: {}".format(sess_nome) if sess_ok else "Sessione base",
                 stato_trade,
                 saldo_virtuale,
-                "Attivo" if ML_MODEL else "Non disponibile"))
+                "Attivo" if ML_MODEL else "N/D"))
 
 # ---------------------------------------------------------
 # BOT LOOP
@@ -957,29 +1038,31 @@ def invia_heartbeat():
 def bot_loop():
     global segnale_in_attesa, trade_attivo, pausa_bot_fino, saldo_virtuale
 
-    print("FOREX ENGINE + ML AVVIATO")
+    print("FOREX AGENT AVVIATO")
     ml_ok = carica_modello()
 
     send_telegram(
-        "*FOREX ENGINE + ML AVVIATO*\n"
-        "*Render Cloud 24/7*\n\n"
+        "*FOREX AGENT AVVIATO*\n"
+        "*Render/HuggingFace 24/7*\n\n"
         "Saldo: *{:.2f} EUR*\n"
         "Win Rate: *{:.1f}%* ({} trade)\n\n"
-        "Filtri tecnici:\n"
-        "EMA 15m + 1H + 4H + EMA200\n"
-        "RSI + Bollinger + MACD\n"
-        "Pattern candele + SR\n"
-        "BB Squeeze filter\n\n"
-        "Modello ML: {}\n"
-        "XGBoost addestrato su dati storici\n"
-        "Aggiunge fino a +3 punti allo score\n\n"
+        "Come funziona:\n"
+        "1. Agente analizza ogni 15 min\n"
+        "2. Trova segnale → ti avvisa\n"
+        "3. Scrivi SI → istruzioni MT5\n"
+        "4. Segui i passi su MT5\n"
+        "5. Scrivi Entrato → monitoraggio\n"
+        "6. Agente ti guida in tempo reale\n"
+        "7. Ti dice quando e come uscire\n\n"
+        "ML: {}\n\n"
         "Comandi:\n"
-        "Entrato/ok → conferma trade\n"
-        "filtri/stato → telemetria\n"
+        "si/entrato → conferma trade\n"
+        "no → salta segnale\n"
+        "filtri → telemetria\n"
         "pausa → sospendi 2 ore\n"
         "riprendi → riattiva\n"
         "saldo X.XX → aggiorna saldo\n"
-        "+X.XX/-X.XX → registra risultato".format(
+        "+X.XX/-X.XX → risultato trade".format(
             saldo_virtuale,
             stats["vinti"] / stats["totali"] * 100 if stats["totali"] > 0 else 0,
             stats["totali"],
@@ -992,28 +1075,33 @@ def bot_loop():
         try:
             invia_heartbeat()
 
+            # timeout segnale
             if segnale_in_attesa["attivo"]:
                 if time.time() - segnale_in_attesa["timestamp_generazione"] > TIMEOUT_SEGNALE_SEC:
                     sym = segnale_in_attesa["data_trade"]["symbol"]
-                    send_telegram("*Segnale scaduto* - {}\nRiprendo ricerca.".format(sym))
+                    send_telegram(
+                        "*Segnale scaduto* - {}\n"
+                        "Nessuna risposta ricevuta.\n"
+                        "Riprendo la ricerca.".format(sym))
                     segnale_in_attesa["attivo"] = False
 
             msg_in = leggi_messaggio_telegram()
             if msg_in:
                 parola = msg_in.strip().lower()
 
-                if parola in ["filtri", "stato", "telemetria", "test"]:
+                # comandi sistema
+                if parola in ["filtri", "stato", "telemetria"]:
                     send_telegram(genera_telemetria())
                     continue
 
                 if parola in ["pausa", "sospendi"]:
                     pausa_bot_fino = datetime.now() + timedelta(hours=2)
-                    send_telegram("Bot in pausa per 2 ore.")
+                    send_telegram("Agente in pausa per 2 ore.\nScrivi *riprendi* per riattivare.")
                     continue
 
                 if parola in ["riprendi", "attiva"]:
                     pausa_bot_fino = None
-                    send_telegram("Bot riattivato.")
+                    send_telegram("Agente riattivato!")
                     continue
 
                 if parola.startswith("saldo "):
@@ -1021,13 +1109,27 @@ def bot_loop():
                         nuovo_s = float(parola.split()[1].replace(",", "."))
                         saldo_virtuale = nuovo_s
                         salva_stato()
-                        send_telegram("Saldo: *{:.2f} EUR*".format(saldo_virtuale))
+                        send_telegram("Saldo aggiornato: *{:.2f} EUR*".format(saldo_virtuale))
                         invia_report()
                     except:
                         send_telegram("Usa: saldo 105.50")
                     continue
 
-                if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "si", "confermo"]:
+                # risposta SI al segnale → manda istruzioni MT5
+                if segnale_in_attesa["attivo"] and parola in ["si", "s", "yes", "y"]:
+                    dt = segnale_in_attesa["data_trade"]
+                    invia_istruzioni_entrata(dt)
+                    continue
+
+                # NO al segnale → salta
+                if segnale_in_attesa["attivo"] and parola in ["no", "n", "skip"]:
+                    sym = segnale_in_attesa["data_trade"]["symbol"]
+                    segnale_in_attesa["attivo"] = False
+                    send_telegram("Segnale {} saltato.\nContinuo a cercare.".format(sym))
+                    continue
+
+                # conferma entrata → attiva monitoraggio
+                if segnale_in_attesa["attivo"] and parola in ["entrato", "ok", "go", "confermo"]:
                     dt = segnale_in_attesa["data_trade"]
                     trade_attivo.update({
                         "aperto"              : True,
@@ -1039,32 +1141,44 @@ def bot_loop():
                         "be_fatto"            : False,
                         "ora_entrata"         : datetime.now(),
                         "atr"                 : dt["atr"],
-                        "in_attesa_risultato" : False
+                        "size"                : dt["size"],
+                        "in_attesa_risultato" : False,
+                        "step"                : "monitoraggio"
                     })
                     segnale_in_attesa["attivo"] = False
                     send_telegram(
                         "*Trade attivato!*\n"
                         "{} {}\n"
-                        "Monitor ogni {} min\n\n"
-                        "Quando chiudi scrivi:\n"
+                        "Volume: {} lotti\n"
+                        "SL: `{:.5f}`\n"
+                        "TP: `{:.5f}`\n\n"
+                        "Monitoro ogni {} minuto\n"
+                        "Ti avviso su ogni aggiornamento!\n\n"
+                        "Quando il trade si chiude scrivi:\n"
                         "+X.XX guadagno\n"
                         "-X.XX perdita\n"
-                        "0 pareggio".format(dt["symbol"], dt["direction"], MONITOR_MIN))
+                        "0 pareggio".format(
+                            dt["symbol"], dt["direction"],
+                            dt["size"], dt["sl"], dt["tp"],
+                            MONITOR_MIN))
                     continue
 
+                # registra risultato
                 if not msg_in.startswith("/"):
                     if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
                         registra_risultato(msg_in)
                     else:
                         send_telegram(
-                            "Sono online!\n"
+                            "Agente online!\n"
                             "Saldo: *{:.2f} EUR*\n"
-                            "ML: {}\n"
-                            "Scrivi *filtri* per lo stato".format(
+                            "ML: {}\n\n"
+                            "Scrivi *filtri* per lo stato\n"
+                            "Prossima analisi tra poco".format(
                                 saldo_virtuale,
-                                "Attivo" if ML_MODEL else "Non disponibile"))
+                                "Attivo" if ML_MODEL else "N/D"))
                     continue
 
+            # monitor o analisi
             if trade_attivo["aperto"] and not trade_attivo["in_attesa_risultato"]:
                 monitora_trade()
                 time.sleep(MONITOR_MIN * 60)
@@ -1074,7 +1188,7 @@ def bot_loop():
 
         except Exception as e:
             print("Errore loop: {}".format(e))
-            send_telegram("Errore: {} - riavvio...".format(str(e)[:50]))
+            send_telegram("Errore agente: {} - riavvio...".format(str(e)[:50]))
             time.sleep(30)
 
 # ---------------------------------------------------------
