@@ -1,3 +1,7 @@
 requests
 matplotlib
 Flask
+xgboost
+scikit-learn
+numpy
+pandas
