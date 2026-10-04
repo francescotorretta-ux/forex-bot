@@ -64,12 +64,6 @@ def carica_modello():
         return False
 
 def predici_ml(closes, highs, lows, opens):
-    """
-    Predizione ML con 27 feature (modello v2.0-2025-calibrated).
-    Compatibile retroattivamente: se il modello ha 10 feature (vecchio),
-    usa la funzione legacy; se ha 27 feature (nuovo), usa quella estesa.
-    Soglia consigliata: 55% confidenza per segnali direzionali.
-    """
     if ML_MODEL is None or len(closes) < 30:
         return None, 0.0
     try:
@@ -78,129 +72,48 @@ def predici_ml(closes, highs, lows, opens):
         l = pd.Series(lows)
         o = pd.Series(opens)
 
-        # --- EMA ---
-        ema8   = c.ewm(span=8,   adjust=False).mean()
-        ema21  = c.ewm(span=21,  adjust=False).mean()
-        ema50  = c.ewm(span=50,  adjust=False).mean()
-        ema200 = c.ewm(span=200, adjust=False).mean() if len(closes) >= 200 else ema50
+        ema50  = c.ewm(span=50,  adjust=False).mean().iloc[-1]
+        ema200 = c.ewm(span=200, adjust=False).mean().iloc[-1] if len(closes) >= 200 else ema50
 
-        # --- RSI 14 e RSI 7 ---
         delta  = c.diff()
-        rsi    = 100 - 100 / (1 + delta.clip(lower=0).rolling(14).mean() /
-                               ((-delta.clip(upper=0)).rolling(14).mean() + 1e-10))
-        rsi_f  = 100 - 100 / (1 + delta.clip(lower=0).rolling(7).mean() /
-                               ((-delta.clip(upper=0)).rolling(7).mean() + 1e-10))
+        gain   = delta.clip(lower=0).rolling(14).mean()
+        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+        rs     = gain / (loss + 1e-10)
+        rsi_val = float((100 - (100 / (1 + rs))).iloc[-1])
 
-        # --- MACD ---
-        ml_s   = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-        macd_h = ml_s - ml_s.ewm(span=9, adjust=False).mean()
+        ema12   = c.ewm(span=12, adjust=False).mean()
+        ema26   = c.ewm(span=26, adjust=False).mean()
+        macd_l  = ema12 - ema26
+        macd_s  = macd_l.ewm(span=9, adjust=False).mean()
+        macd_h  = float((macd_l - macd_s).iloc[-1])
 
-        # --- Bollinger ---
-        ma20   = c.rolling(20).mean()
-        sd20   = c.rolling(20).std()
-        bu     = ma20 + 2 * sd20
-        bl     = ma20 - 2 * sd20
-        bb_w   = (bu - bl) / (ma20 + 1e-10) * 100
-        bb_pos = (c - bl) / (bu - bl + 1e-10)
-        bb_sq  = bb_w.rolling(20).min() / (bb_w + 1e-10)
+        ma20    = c.rolling(20).mean()
+        sd20    = c.rolling(20).std()
+        bb_up   = float((ma20 + 2*sd20).iloc[-1])
+        bb_lo   = float((ma20 - 2*sd20).iloc[-1])
+        bb_w    = (bb_up - bb_lo) / (float(ma20.iloc[-1]) + 1e-10) * 100
+        bb_pos  = (closes[-1] - bb_lo) / (bb_up - bb_lo + 1e-10)
 
-        # --- ATR ---
-        tr     = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-        a14    = tr.rolling(14).mean()
-        a7     = tr.rolling(7).mean()
-        a30    = a14.rolling(30).mean()
-        atr_val = float(a14.iloc[-1])
+        tr      = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+        atr_s   = tr.rolling(14).mean()
+        atr_val = float(atr_s.iloc[-1])
+        atr_m   = float(atr_s.rolling(30).mean().iloc[-1])
+        vol_rat = atr_val / (atr_m + 1e-10)
 
-        # --- Feature normalizzate ---
-        p_ema50  = (c - ema50)  / (a14 + 1e-10)
-        p_ema200 = (c - ema200) / (a14 + 1e-10)
-        p_ema8   = (c - ema8)   / (a14 + 1e-10)
-        p_ema21  = (c - ema21)  / (a14 + 1e-10)
-        ema_sp   = (ema50 - ema200) / (a14 + 1e-10)
-        ema821   = (ema8 - ema21)   / (a14 + 1e-10)
+        p_ema50  = (closes[-1] - ema50)  / (atr_val + 1e-10)
+        p_ema200 = (closes[-1] - ema200) / (atr_val + 1e-10)
+        body     = (closes[-1] - opens[-1]) / (atr_val + 1e-10)
+        mom3     = (closes[-1] / closes[-4]  - 1) * 100 if len(closes) >= 4  else 0
+        mom10    = (closes[-1] / closes[-11] - 1) * 100 if len(closes) >= 11 else 0
 
-        body     = (c - o) / (a14 + 1e-10)
-        crange   = (h - l) / (a14 + 1e-10)
-        ush      = (h - pd.concat([c, o], axis=1).max(axis=1)) / (a14 + 1e-10)
-        lsh      = (pd.concat([c, o], axis=1).min(axis=1) - l) / (a14 + 1e-10)
+        X = np.array([[rsi_val, macd_h, bb_w, bb_pos,
+                        p_ema50, p_ema200,
+                        body, mom3, mom10, vol_rat]])
 
-        mom3  = c.pct_change(3)  * 100
-        mom5  = c.pct_change(5)  * 100
-        mom10 = c.pct_change(10) * 100
-        mom20 = c.pct_change(20) * 100
-
-        vr   = a14 / (a30 + 1e-10)
-        vrf  = a7  / (a14 + 1e-10)
-
-        rsi_slope  = rsi.diff(3)
-        macd_slope = macd_h.diff(3)
-        vol_trend  = a14.pct_change(5) * 100
-        price_acc  = c.pct_change(3) - c.pct_change(3).shift(3)
-
-        low14  = l.rolling(14).min()
-        high14 = h.rolling(14).max()
-        stk    = (c - low14) / (high14 - low14 + 1e-10) * 100
-
-        # --- Costruisce vettore feature nell'ordine del modello ---
-        feat_map = {
-            'rsi':      float(rsi.iloc[-1]),
-            'rsi_f':    float(rsi_f.iloc[-1]),
-            'macd_h':   float(macd_h.iloc[-1]),
-            'bb_w':     float(bb_w.iloc[-1]),
-            'bb_pos':   float(bb_pos.iloc[-1]),
-            'bb_sq':    float(bb_sq.iloc[-1]),
-            'p_ema50':  float(p_ema50.iloc[-1]),
-            'p_ema200': float(p_ema200.iloc[-1]),
-            'p_ema8':   float(p_ema8.iloc[-1]),
-            'p_ema21':  float(p_ema21.iloc[-1]),
-            'ema_sp':   float(ema_sp.iloc[-1]),
-            'ema821':   float(ema821.iloc[-1]),
-            'body':     float(body.iloc[-1]),
-            'crange':   float(crange.iloc[-1]),
-            'ush':      float(ush.iloc[-1]),
-            'lsh':      float(lsh.iloc[-1]),
-            'mom3':     float(mom3.iloc[-1]),
-            'mom5':     float(mom5.iloc[-1]),
-            'mom10':    float(mom10.iloc[-1]),
-            'mom20':    float(mom20.iloc[-1]),
-            'vol_rat':  float(vr.iloc[-1]),
-            'vol_ratf': float(vrf.iloc[-1]),
-            'rsi_slope':   float(rsi_slope.iloc[-1]),
-            'macd_slope':  float(macd_slope.iloc[-1]),
-            'vol_trend':   float(vol_trend.iloc[-1]),
-            'price_acc':   float(price_acc.iloc[-1]),
-            'stoch_k':     float(stk.iloc[-1]),
-            # Feature legacy (modello vecchio a 10 feature)
-            'p_ema200_old': float(p_ema200.iloc[-1]),
-            'vol_rat_old':  float(vr.iloc[-1]),
-        }
-
-        # Usa l'ordine esatto delle feature del modello caricato
-        if ML_FEATURES:
-            row = [feat_map.get(f, 0.0) for f in ML_FEATURES]
-        else:
-            # fallback ordine legacy
-            row = [feat_map['rsi'], feat_map['macd_h'], feat_map['bb_w'],
-                   feat_map['bb_pos'], feat_map['p_ema50'], feat_map['p_ema200'],
-                   feat_map['body'], feat_map['mom3'], feat_map['mom10'], feat_map['vol_rat']]
-
-        # Controlla NaN
-        if any(np.isnan(v) for v in row):
-            return None, 0.0
-
-        X = np.array([row])
-        proba     = ML_MODEL.predict_proba(X)[0]
-        pred      = int(ML_MODEL.predict(X)[0])
-        confidenza = float(proba[pred]) * 100
-        label_map  = {0: "NESSUNO", 1: "LONG", 2: "SHORT"}
-
-        # Soglia minima 55% (calibrata sul modello v2)
-        ML_SOGLIA = 55.0
-        if confidenza < ML_SOGLIA:
-            return "NESSUNO", confidenza
-
-        return label_map[pred], confidenza
-
+        proba = ML_MODEL.predict_proba(X)[0]
+        pred  = int(ML_MODEL.predict(X)[0])
+        label_map = {0: "NESSUNO", 1: "LONG", 2: "SHORT"}
+        return label_map[pred], float(proba[pred]) * 100
     except Exception as e:
         print("Errore ML: {}".format(e))
         return None, 0.0
@@ -224,9 +137,9 @@ SESSIONI_OTTIMALI = [
     (16, 18),
 ]
 
-TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN",    "8661209874:AAFpXrtUgUgAhALBfRWsitnLvo=s2IGZ3k")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",  "6559735989")
-TWELVEDATA_API_KEY = os.environ.get("TWELVE_DATA_KEY",   "f7ad19a1b160485cb773bacfad03543d")
+TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "8661209874:AAEeCRl0Wy9edx8mUAL9e50zfyt_To7WrsA")
+TELEGRAM_CHAT_ID   = "6559735989"
+TWELVEDATA_API_KEY = "f7ad19a1b160485cb773bacfad03543d"
 
 FILE_STORICO = "storico_saldo.txt"
 FILE_STATO   = "stato_bot.json"
