@@ -205,16 +205,36 @@ if not os.path.exists(FILE_STORICO):
 # TELEGRAM
 # ---------------------------------------------------------
 def send_telegram(msg):
+    url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)
+    # Primo tentativo con Markdown
     try:
-        url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)
-        requests.post(url, data={
+        r = requests.post(url, data={
             "chat_id"   : TELEGRAM_CHAT_ID,
             "text"      : msg,
             "parse_mode": "Markdown"
         }, timeout=10)
-        print("TG: {}".format(msg[:60]))
+        data = r.json()
+        if data.get("ok"):
+            print("TG OK: {}".format(msg[:60]))
+            return
+        # Markdown malformato → riprova senza formattazione
+        print("TG Markdown fallito: {} - riprovo senza".format(data.get("description","")))
     except Exception as e:
-        print("Errore TG: {}".format(e))
+        print("TG errore rete: {}".format(e))
+
+    # Secondo tentativo senza parse_mode (testo puro)
+    try:
+        r = requests.post(url, data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text"   : msg.replace("*","").replace("`","").replace("_","")
+        }, timeout=10)
+        data = r.json()
+        if data.get("ok"):
+            print("TG OK (plain): {}".format(msg[:60]))
+        else:
+            print("TG FALLITO: {}".format(data.get("description","")))
+    except Exception as e:
+        print("TG errore finale: {}".format(e))
 
 def send_telegram_foto(photo_path, caption):
     try:
@@ -981,7 +1001,7 @@ def esegui_analisi():
             return
 
     stato = (
-        "*AGENTE - {]*\n"
+        "*AGENTE - {}*\n"
         "{}\n\n"
         "{}\n\n"
         "Nessun segnale - prossima analisi tra 15 min"
