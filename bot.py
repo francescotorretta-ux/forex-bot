@@ -224,7 +224,7 @@ SESSIONI_OTTIMALI = [
     (16, 18),
 ]
 
-TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN",    "8661209874:AAEeCRl0Wy9edx8mUAL9e5ozfyt_To7WrsA")
+TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN",    "8661209874:AAFpXrtUgUgAhALBfRWsitnLvo=s2IGZ3k")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",  "6559735989")
 TWELVEDATA_API_KEY = os.environ.get("TWELVE_DATA_KEY",   "f7ad19a1b160485cb773bacfad03543d")
 
