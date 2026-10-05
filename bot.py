@@ -25,9 +25,15 @@ def adesso():
 # ---------------------------------------------------------
 # CONFIGURAZIONE  (i segreti arrivano SOLO da variabili d'ambiente)
 # ---------------------------------------------------------
-TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN",     "8661209874:AAFpX-rtUgUgAhALBfRWsitnLvo0s2IGZ3k")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "6559735989")
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "f7ad19a1b160485cb773bacfad03543d")
+def _env(nome):
+    """Legge una variabile d'ambiente ripulendo spazi, a-capo e virgolette
+    (errori comuni quando si incolla il valore nel pannello di Render)."""
+    return os.environ.get(nome, "").strip().strip('"').strip("'").strip()
+
+
+TELEGRAM_TOKEN     = _env("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID   = _env("TELEGRAM_CHAT_ID")
+TWELVEDATA_API_KEY = _env("TWELVEDATA_API_KEY")
 
 SYMBOLS             = ["EUR/USD", "GBP/USD"]
 SALDO_INIZIALE      = 100.0
@@ -142,17 +148,35 @@ def home():
 @app.route('/test')
 def test_tg():
     """Apri /test dal browser: mostra la risposta reale di Telegram."""
+    righe = []
+    righe.append("TELEGRAM_TOKEN   : {}".format(
+        "MANCANTE" if not TELEGRAM_TOKEN else
+        "presente, {} caratteri, inizia con {}...".format(len(TELEGRAM_TOKEN), TELEGRAM_TOKEN[:6])))
+    righe.append("TELEGRAM_CHAT_ID : {}".format(TELEGRAM_CHAT_ID or "MANCANTE"))
+    righe.append("Thread bot vivo  : {}".format(
+        bot_thread is not None and bot_thread.is_alive()))
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return "ERRORE: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID non impostati su Render", 200
-    url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)
-    try:
-        r = requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text"   : "test dal bot"
-        }, timeout=10)
-        return "{} {}".format(r.status_code, r.text), 200
-    except Exception as e:
-        return "Errore: {}".format(e), 200
+        righe.append("\nERRORE: imposta TELEGRAM_TOKEN e TELEGRAM_CHAT_ID nelle Environment di Render")
+        return "\n".join(righe), 200
+
+    base = "https://api.telegram.org/bot{}".format(TELEGRAM_TOKEN)
+    passi = [
+        ("getMe",          lambda: requests.get(base + "/getMe", timeout=10)),
+        ("getWebhookInfo", lambda: requests.get(base + "/getWebhookInfo", timeout=10)),
+        ("getChat",        lambda: requests.get(base + "/getChat",
+                                                params={"chat_id": TELEGRAM_CHAT_ID}, timeout=10)),
+        ("sendMessage",    lambda: requests.post(base + "/sendMessage", data={
+                                "chat_id": TELEGRAM_CHAT_ID, "text": "test dal bot"}, timeout=10)),
+    ]
+    for nome, fn in passi:
+        try:
+            r = fn()
+            righe.append("\n[{}] {} {}".format(nome, r.status_code, r.text[:400]))
+        except Exception as e:
+            righe.append("\n[{}] ERRORE rete: {}".format(nome, e))
+    righe.append("\nLegenda: 401=token errato/revocato | 400 'chat not found'=chat_id errato "
+                 "o non hai mai premuto Start sul bot | 403=bot bloccato")
+    return "\n".join(righe), 200
 
 
 def run_flask():
@@ -307,26 +331,55 @@ def send_telegram(msg):
         print("TG: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID mancanti", flush=True)
         return False
     url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)
-    try:
-        r = requests.post(url, data={
-            "chat_id"   : TELEGRAM_CHAT_ID,
-            "text"      : msg,
-            "parse_mode": "Markdown"
-        }, timeout=10)
-        if r.status_code == 200:
-            print("TG OK: {}".format(msg[:60].replace("\n", " ")), flush=True)
-            return True
+    # Telegram accetta max 4096 caratteri per messaggio
+    pezzi = [msg[i:i + 4000] for i in range(0, len(msg), 4000)] or [""]
+    tutto_ok = True
+    for pezzo in pezzi:
+        inviato = False
+        # 3 tentativi per assorbire errori di rete / rate limit temporanei
+        for tentativo in range(3):
+            try:
+                r = requests.post(url, data={
+                    "chat_id"   : TELEGRAM_CHAT_ID,
+                    "text"      : pezzo,
+                    "parse_mode": "Markdown"
+                }, timeout=10)
+                if r.status_code == 200:
+                    print("TG OK: {}".format(pezzo[:60].replace("\n", " ")), flush=True)
+                    inviato = True
+                    break
 
-        print("TG ERRORE {}: {}".format(r.status_code, r.text), flush=True)
-        r2 = requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text"   : msg
-        }, timeout=10)
-        print("TG retry senza Markdown: {}".format(r2.status_code), flush=True)
-        return r2.status_code == 200
-    except Exception as e:
-        print("Errore TG: {}".format(e), flush=True)
-        return False
+                print("TG ERRORE {}: {}".format(r.status_code, r.text), flush=True)
+
+                if r.status_code == 429:
+                    try:
+                        attesa = int(r.json().get("parameters", {}).get("retry_after", 2))
+                    except Exception:
+                        attesa = 2
+                    time.sleep(min(attesa, 30))
+                    continue
+
+                if r.status_code == 400 and "parse" in r.text.lower():
+                    # Markdown non valido: reinvia come testo semplice
+                    r2 = requests.post(url, data={
+                        "chat_id": TELEGRAM_CHAT_ID,
+                        "text"   : pezzo
+                    }, timeout=10)
+                    print("TG retry senza Markdown: {} {}".format(
+                        r2.status_code, r2.text[:200]), flush=True)
+                    if r2.status_code == 200:
+                        inviato = True
+                    break
+
+                # 401 (token errato), 400 chat not found, 403 bot bloccato:
+                # inutile riprovare, l'errore e' di configurazione
+                if r.status_code in (400, 401, 403, 404):
+                    break
+            except Exception as e:
+                print("Errore TG (tentativo {}): {}".format(tentativo + 1, e), flush=True)
+                time.sleep(2)
+        tutto_ok = tutto_ok and inviato
+    return tutto_ok
 
 
 def send_telegram_foto(photo_path, caption):
@@ -1372,13 +1425,45 @@ def bot_loop():
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
+bot_thread = None
+_bot_lock_file = None
+
+
+def _bot_supervisor():
+    """Fa ripartire bot_loop se muore per un'eccezione non gestita
+    (prima il thread poteva morire in silenzio e non arrivava piu' nulla)."""
+    import traceback
+    while True:
+        try:
+            bot_loop()
+        except Exception:
+            print("bot_loop CRASH:\n{}".format(traceback.format_exc()), flush=True)
+        time.sleep(10)
+
+
+def avvia_bot_una_volta():
+    """Avvia il thread del bot UNA sola volta, sia con `python main.py`
+    sia con gunicorn (dove il blocco __main__ non viene mai eseguito:
+    la pagina web risponde ma il bot non parte e Telegram resta muto)."""
+    global bot_thread, _bot_lock_file
+    if bot_thread is not None:
+        return
+    try:
+        import fcntl
+        _bot_lock_file = open("/tmp/forex_bot.lock", "w")
+        fcntl.flock(_bot_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        pass  # Windows: nessun lock
+    except OSError:
+        print("Un altro worker gestisce gia' il bot: non avvio un duplicato", flush=True)
+        return
+    bot_thread = Thread(target=_bot_supervisor, daemon=True)
+    bot_thread.start()
+
+
+# Avvio all'import: funziona con gunicorn (`gunicorn main:app`) e con python
+avvia_bot_una_volta()
+
+
 if __name__ == "__main__":
-    t = Thread(target=bot_loop)
-    t.daemon = True
-
-    def avvio_ritardato():
-        time.sleep(2)
-        t.start()
-
-    Thread(target=avvio_ritardato).start()
     run_flask()
