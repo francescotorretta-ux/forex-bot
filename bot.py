@@ -410,7 +410,14 @@ def leggi_messaggio_telegram():
         params = {"offset": last_update_id + 1, "timeout": 2}
         r = requests.get(url, params=params, timeout=8).json()
         if not r.get("ok"):
-            print("getUpdates errore: {}".format(r), flush=True)
+            if r.get("error_code") == 401:
+                print("TOKEN TELEGRAM NON VALIDO (401). Genera un nuovo token con "
+                      "@BotFather e aggiorna TELEGRAM_TOKEN su Render. Riprovo tra 60s.",
+                      flush=True)
+                time.sleep(60)
+            else:
+                print("getUpdates errore: {}".format(r), flush=True)
+                time.sleep(5)
             return None
         for update in r.get("result", []):
             last_update_id = update["update_id"]
