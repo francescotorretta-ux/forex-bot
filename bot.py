@@ -19,6 +19,11 @@ app = Flask(__name__)
 def home():
     ora = datetime.now().strftime("%H:%M:%S")
     wr  = (stats["vinti"] / stats["totali"] * 100) if stats["totali"] > 0 else 0
+    @app.route('/test')
+def test_tg():
+    url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN)
+    r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": "test dal bot"}, timeout=10)
+    return "{} {}".format(r.status_code, r.text), 200
     return (
         "FOREX AGENT ONLINE\n"
         "Ora: {}\n"
