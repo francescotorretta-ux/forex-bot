@@ -211,8 +211,8 @@ FILE_STATO   = "stato_bot.json"
 # ---------------------------------------------------------
 def carica_stato():
     default = {
-        "saldo_virtuale": 108.58,
-        "stats": {"vinti": 9, "persi": 12, "pareggi": 0, "totali": 21}
+        "saldo_virtuale": 107.89,
+        "stats": {"vinti": 18, "persi": 13, "pareggi": 0, "totali": 31}
     }
     if os.path.exists(FILE_STATO):
         try:
