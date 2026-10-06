@@ -30,8 +30,8 @@ TELEGRAM_CHAT_ID   = _env("TELEGRAM_CHAT_ID")
 TWELVEDATA_API_KEY = _env("TWELVEDATA_API_KEY")
 
 SYMBOLS             = ["EUR/USD", "GBP/USD"]
-SALDO_INIZIALE      = 100.0
-RISCHIO_BASE        = 0.02
+SALDO_INIZIALE      = 5.0        # Capitale reale di partenza
+TARGET_FINALE       = 1000.0     # Obiettivo
 SESSIONE_START      = 9
 SESSIONE_END        = 22
 SPREAD_BUFFER       = 1.5
@@ -39,6 +39,74 @@ SOGLIA_APPROVAZIONE = 7
 MONITOR_MIN         = 1
 TIMEOUT_SEGNALE_SEC = 300
 SESSIONI_OTTIMALI   = [(9,11),(14,16),(16,18)]
+
+# ---------------------------------------------------------
+# SISTEMA KELLY ADATTIVO
+# Il rischio per trade si adatta automaticamente in base a:
+# - Win rate recente (ultimi 10 trade)
+# - Fase di crescita del conto
+# - Drawdown in corso
+# ---------------------------------------------------------
+KELLY_MIN    = 0.02   # 2% rischio minimo (protezione)
+KELLY_MAX    = 0.08   # 8% rischio massimo (aggressivo ma non suicida)
+DRAWDOWN_MAX = 0.20   # Se perdi >20% dal picco → modalità difesa
+
+def calcola_rischio_kelly(saldo, stats, peak_saldo):
+    """
+    Calcola la percentuale di rischio ottimale con Kelly adattivo.
+
+    Formula Kelly semplificata:
+      f = W - (1-W)/R
+    dove W = win rate, R = R/R medio atteso (2.5)
+
+    Poi viene scalata in base alla fase di crescita e al drawdown.
+    """
+    totali = stats.get("totali", 0)
+    vinti  = stats.get("vinti",  0)
+
+    # Con meno di 5 trade usa rischio conservativo finché non ci sono dati
+    if totali < 5:
+        return 0.02
+
+    # Win rate reale
+    wr = vinti / totali
+    rr = 2.5   # R/R medio del bot (TP = 2.5 * SL)
+
+    # Formula Kelly
+    kelly = wr - (1 - wr) / rr
+
+    # Kelly negativo = sistema non profittevole → rischio minimo
+    if kelly <= 0:
+        return KELLY_MIN
+
+    # Usa 25% del Kelly pieno (Kelly frazionale — standard professionale)
+    kelly_fraz = kelly * 0.25
+
+    # Fase di crescita: più siamo lontani dall'obiettivo, più spingiamo
+    progresso = min(saldo / TARGET_FINALE, 1.0)
+    if progresso < 0.10:      # 0-50€: fase aggressiva, ogni € conta
+        moltiplicatore = 1.4
+    elif progresso < 0.30:    # 50-300€: crescita sostenuta
+        moltiplicatore = 1.2
+    elif progresso < 0.70:    # 300-700€: crescita moderata
+        moltiplicatore = 1.0
+    else:                     # 700-1000€: proteggi i guadagni
+        moltiplicatore = 0.7
+
+    # Drawdown protection: se siamo sotto il picco storico, riduci
+    if peak_saldo > 0:
+        drawdown = (peak_saldo - saldo) / peak_saldo
+        if drawdown > DRAWDOWN_MAX:
+            return KELLY_MIN  # modalità difesa
+        elif drawdown > 0.10:
+            moltiplicatore *= 0.6   # riduzione 40% se drawdown >10%
+        elif drawdown > 0.05:
+            moltiplicatore *= 0.8   # riduzione 20% se drawdown >5%
+
+    rischio = kelly_fraz * moltiplicatore
+
+    # Clamp tra min e max
+    return max(KELLY_MIN, min(KELLY_MAX, rischio))
 
 FILE_STORICO  = "storico_saldo.txt"
 FILE_STATO    = "stato_bot.json"
@@ -56,24 +124,42 @@ except Exception:
 # PERSISTENZA STATO
 # ---------------------------------------------------------
 def carica_stato():
-    default = {"saldo_virtuale": 107.89,
-               "stats": {"vinti":18,"persi":13,"pareggi":0,"totali":31}}
+    default = {
+        "saldo_virtuale": SALDO_INIZIALE,
+        "peak_saldo":     SALDO_INIZIALE,
+        "stats": {"vinti":0,"persi":0,"pareggi":0,"totali":0},
+        "fase": "aggressiva"
+    }
     if os.path.exists(FILE_STATO):
         try:
-            with open(FILE_STATO,"r") as f: return json.load(f)
+            with open(FILE_STATO,"r") as f:
+                d = json.load(f)
+                # retrocompatibilità
+                if "peak_saldo" not in d:
+                    d["peak_saldo"] = d.get("saldo_virtuale", SALDO_INIZIALE)
+                if "fase" not in d:
+                    d["fase"] = "aggressiva"
+                return d
         except Exception: pass
     return default
 
 def salva_stato():
     try:
         with open(FILE_STATO,"w") as f:
-            json.dump({"saldo_virtuale":saldo_virtuale,"stats":stats},f)
+            json.dump({
+                "saldo_virtuale": saldo_virtuale,
+                "peak_saldo":     peak_saldo,
+                "stats":          stats,
+                "fase":           fase_corrente
+            }, f)
     except Exception as e:
         print("Errore salvataggio: {}".format(e),flush=True)
 
 _stato         = carica_stato()
 saldo_virtuale = _stato["saldo_virtuale"]
+peak_saldo     = _stato["peak_saldo"]
 stats          = _stato["stats"]
+fase_corrente  = _stato.get("fase","aggressiva")
 last_update_id       = -1
 ultimo_heartbeat_ora = -1
 macd_memoria         = {}
@@ -89,7 +175,7 @@ segnale_in_attesa = {
 }
 
 if not os.path.exists(FILE_STORICO):
-    with open(FILE_STORICO,"w") as f: f.write("100.0\n108.58\n")
+    with open(FILE_STORICO,"w") as f: f.write("{:.4f}\n".format(SALDO_INIZIALE))
 
 # ---------------------------------------------------------
 # FLASK
@@ -305,21 +391,39 @@ def genera_e_invia_grafico(testo_report):
         print("Errore grafico: {}".format(e),flush=True); send_telegram(testo_report)
 
 def invia_report():
-    wr=(stats["vinti"]/stats["totali"]*100) if stats["totali"]>0 else 0
-    profitto=saldo_virtuale-SALDO_INIZIALE
-    p_str="+{:.2f}".format(profitto) if profitto>=0 else "{:.2f}".format(profitto)
-    msg=("*DIARIO DI TRADING*\n"
-         "-------------------------\n"
-         "Saldo    : *{:.2f} EUR*\n"
-         "Profitto : *{} EUR*\n"
-         "Win Rate : *{:.1f}%*\n"
-         "-------------------------\n"
-         "Vinti    : {}\n"
-         "Persi    : {}\n"
-         "Pareggi  : {}\n"
-         "Totali   : {}").format(
-        saldo_virtuale,p_str,wr,
-        stats["vinti"],stats["persi"],stats["pareggi"],stats["totali"])
+    wr       = (stats["vinti"]/stats["totali"]*100) if stats["totali"]>0 else 0
+    profitto = saldo_virtuale - SALDO_INIZIALE
+    p_str    = "+{:.4f}".format(profitto) if profitto>=0 else "{:.4f}".format(profitto)
+    progresso= min(saldo_virtuale/TARGET_FINALE*100, 100.0)
+    drawdown = (peak_saldo-saldo_virtuale)/peak_saldo*100 if peak_saldo>0 else 0
+    rischio  = calcola_rischio_kelly(saldo_virtuale, stats, peak_saldo)
+
+    # Barra di progresso visiva
+    blocchi  = int(progresso / 5)
+    barra    = "[" + "█"*blocchi + "░"*(20-blocchi) + "]"
+
+    msg = (
+        "*DIARIO DI TRADING*\n"
+        "-------------------------\n"
+        "Saldo    : *{:.4f} EUR*\n"
+        "Profitto : *{} EUR*\n"
+        "Peak     : {:.4f} EUR\n"
+        "Drawdown : {:.1f}%\n"
+        "-------------------------\n"
+        "Win Rate : *{:.1f}%*\n"
+        "Vinti    : {} | Persi: {} | Tot: {}\n"
+        "-------------------------\n"
+        "Fase     : *{}*\n"
+        "Rischio  : *{:.1f}%* per trade\n"
+        "-------------------------\n"
+        "Obiettivo: 1.000 EUR\n"
+        "{} {:.1f}%"
+    ).format(
+        saldo_virtuale, p_str, peak_saldo, drawdown,
+        wr, stats["vinti"], stats["persi"], stats["totali"],
+        fase_corrente.upper(), rischio*100,
+        barra, progresso
+    )
     genera_e_invia_grafico(msg)
 
 # ---------------------------------------------------------
@@ -454,28 +558,69 @@ def genera_report_dettagliato():
 # REGISTRA RISULTATO (aggiornato con storico settimanale)
 # ---------------------------------------------------------
 def registra_risultato(testo):
-    global saldo_virtuale,stats,trade_attivo
+    global saldo_virtuale,peak_saldo,stats,trade_attivo,fase_corrente
     testo=testo.strip().replace(",",".")
     try: profit=float(testo)
     except Exception:
         send_telegram("Formato non riconosciuto.\n\n+1.50=guadagno\n-1.50=perdita\n0=pareggio")
         return False
-    saldo_virtuale+=profit; stats["totali"]+=1
-    direction=trade_attivo.get("direction","N/D")
-    symbol=trade_attivo.get("symbol","N/D")
-    if profit>0.02: stats["vinti"]+=1; emoji="VINTO"
-    elif profit<-0.02: stats["persi"]+=1; emoji="PERSO"
-    else: stats["pareggi"]+=1; emoji="PAREGGIO"
+
+    saldo_virtuale = round(saldo_virtuale+profit, 4)
+    stats["totali"] += 1
+    direction = trade_attivo.get("direction","N/D")
+    symbol    = trade_attivo.get("symbol","N/D")
+
+    if profit>0.02:   stats["vinti"]  +=1; emoji="VINTO"
+    elif profit<-0.02: stats["persi"] +=1; emoji="PERSO"
+    else:              stats["pareggi"]+=1; emoji="PAREGGIO"
+
+    # Aggiorna picco storico
+    if saldo_virtuale > peak_saldo:
+        peak_saldo = saldo_virtuale
+
+    # Calcola drawdown e progresso
+    drawdown  = (peak_saldo-saldo_virtuale)/peak_saldo if peak_saldo>0 else 0
+    progresso = min(saldo_virtuale/TARGET_FINALE*100, 100.0)
+
+    # Aggiorna fase automaticamente
+    if drawdown > DRAWDOWN_MAX:
+        fase_corrente = "difesa"
+    elif saldo_virtuale < TARGET_FINALE*0.10:
+        fase_corrente = "aggressiva"
+    elif saldo_virtuale < TARGET_FINALE*0.50:
+        fase_corrente = "crescita"
+    else:
+        fase_corrente = "consolidamento"
+
+    # Calcola rischio prossimo trade
+    rischio_nuovo = calcola_rischio_kelly(saldo_virtuale, stats, peak_saldo)
+    wr = stats["vinti"]/stats["totali"]*100 if stats["totali"]>0 else 0
+
     salva_stato()
-    salva_trade_settimana(profit,direction,symbol)   # NUOVO
-    with open(FILE_STORICO,"a") as f: f.write("{:.2f}\n".format(saldo_virtuale))
+    salva_trade_settimana(profit, direction, symbol)
+    with open(FILE_STORICO,"a") as f: f.write("{:.4f}\n".format(saldo_virtuale))
+
     segno="+" if profit>=0 else ""
-    send_telegram("Registrato: *{}{} EUR* - {}\nSaldo: *{:.2f} EUR*".format(
-        segno,profit,emoji,saldo_virtuale))
+    msg=(
+        "Registrato: *{}{:.4f} EUR* - {}\n\n"
+        "Saldo    : *{:.4f} EUR*\n"
+        "Peak     : {:.4f} EUR\n"
+        "Progresso: {:.1f}% verso 1.000 EUR\n"
+        "Drawdown : {:.1f}%\n"
+        "Win Rate : {:.1f}% ({}/{})\n\n"
+        "Fase     : *{}*\n"
+        "Rischio  : *{:.1f}%* prossimo trade"
+    ).format(
+        segno,profit,emoji,
+        saldo_virtuale,peak_saldo,progresso,drawdown*100,
+        wr,stats["vinti"],stats["totali"],
+        fase_corrente.upper(),rischio_nuovo*100
+    )
+    send_telegram(msg)
     invia_report()
-    trade_attivo["aperto"]=False
-    trade_attivo["in_attesa_risultato"]=False
-    trade_attivo["step"]=None
+    trade_attivo["aperto"]              = False
+    trade_attivo["in_attesa_risultato"] = False
+    trade_attivo["step"]                = None
     return True
 
 # ---------------------------------------------------------
@@ -736,11 +881,13 @@ def calcola_matrice(symbol):
     if score=="B" and not sess_ok:
         return None,"Score B fuori sessione ottimale"
 
-    rischio_eur=saldo_virtuale*RISCHIO_BASE*molt
-    guadagno_pot=rischio_eur*rr
-    units=rischio_eur/(atr*1.5)
-    std=round(max(units/100000,0.01),2)
-    be_level=price+atr*1.25 if direction=="LONG" else price-atr*1.25
+    # Rischio Kelly adattivo
+    rischio_base  = calcola_rischio_kelly(saldo_virtuale, stats, peak_saldo)
+    rischio_eur   = saldo_virtuale * rischio_base * molt
+    guadagno_pot  = rischio_eur * rr
+    units         = rischio_eur / (atr*1.5)
+    std           = round(max(units/100000, 0.01), 2)
+    be_level      = price+atr*1.25 if direction=="LONG" else price-atr*1.25
 
     return {
         "symbol":symbol,"direction":direction,"price":price,
@@ -1003,30 +1150,36 @@ def bot_loop():
         requests.get("https://api.telegram.org/bot{}/deleteWebhook".format(TELEGRAM_TOKEN),timeout=10)
     except Exception: pass
     ml_ok=carica_modello()
+    rischio_avvio = calcola_rischio_kelly(saldo_virtuale, stats, peak_saldo)
+    progresso_avvio = min(saldo_virtuale/TARGET_FINALE*100, 100.0)
     send_telegram(
-        "*FOREX AGENT AVVIATO*\n*Render 24/7*\n\n"
-        "Saldo: *{:.2f} EUR*\n"
-        "Win Rate: *{:.1f}%* ({} trade)\n\n"
-        "Come funziona:\n"
-        "1. Agente analizza ogni 15 min\n"
-        "2. Trova segnale → ti avvisa\n"
-        "3. Scrivi SI → istruzioni MT5\n"
-        "4. Segui i passi su MT5\n"
-        "5. Scrivi Entrato → monitoraggio\n\n"
-        "ML: {}\n\n"
+        "*FOREX AGENT v9 AVVIATO*\n"
+        "*Sistema Kelly Adattivo*\n\n"
+        "Saldo    : *{:.4f} EUR*\n"
+        "Obiettivo: *{:.0f} EUR*\n"
+        "Progresso: *{:.1f}%*\n"
+        "Fase     : *{}*\n"
+        "Rischio  : *{:.1f}%* per trade\n"
+        "ML       : {}\n\n"
+        "Il rischio si adatta automaticamente:\n"
+        "- Fase aggressiva (0-100 EUR): max 8%\n"
+        "- Fase crescita (100-500 EUR): 5-6%\n"
+        "- Fase consolidamento (500+): 2-4%\n"
+        "- Modalita difesa se DD>20%: 2%\n\n"
         "Comandi:\n"
         "si/entrato → conferma trade\n"
         "no → salta segnale\n"
-        "filtri → telemetria completa\n"
+        "filtri → telemetria\n"
         "report → report dettagliato\n"
-        "settimana → report settimanale\n"
+        "settimana → riepilogo settimana\n"
+        "obiettivo → stato verso 1.000 EUR\n"
         "pausa → sospendi 2 ore\n"
         "riprendi → riattiva\n"
         "saldo X.XX → aggiorna saldo\n"
         "+X.XX/-X.XX → risultato trade".format(
-            saldo_virtuale,
-            stats["vinti"]/stats["totali"]*100 if stats["totali"]>0 else 0,
-            stats["totali"],"Attivo" if ml_ok else "Non disponibile"))
+            saldo_virtuale, TARGET_FINALE, progresso_avvio,
+            fase_corrente.upper(), rischio_avvio*100,
+            "Attivo" if ml_ok else "Non disponibile"))
     invia_report()
     prossima_analisi=0.0; prossimo_monitor=0.0
 
@@ -1045,10 +1198,41 @@ def bot_loop():
 
                 if parola in ["filtri","stato","telemetria"]:
                     send_telegram(genera_telemetria()); continue
-                if parola in ["report","dettaglio","dettagliato"]:  # NUOVO
+                if parola in ["report","dettaglio","dettagliato"]:
                     send_telegram(genera_report_dettagliato()); continue
-                if parola in ["settimana","settimanale","week"]:    # NUOVO
+                if parola in ["settimana","settimanale","week"]:
                     send_telegram(genera_report_settimanale()); continue
+                if parola in ["obiettivo","target","crescita","kelly"]:
+                    rischio_att = calcola_rischio_kelly(saldo_virtuale,stats,peak_saldo)
+                    progresso   = min(saldo_virtuale/TARGET_FINALE*100,100.0)
+                    drawdown    = (peak_saldo-saldo_virtuale)/peak_saldo*100 if peak_saldo>0 else 0
+                    blocchi     = int(progresso/5)
+                    barra       = "[" + "█"*blocchi + "░"*(20-blocchi) + "]"
+                    mancano     = TARGET_FINALE - saldo_virtuale
+                    wr          = stats["vinti"]/stats["totali"]*100 if stats["totali"]>0 else 0
+                    # Stima trade rimanenti per raggiungere obiettivo
+                    guadagno_medio = (saldo_virtuale*rischio_att*2.5*wr/100 -
+                                      saldo_virtuale*rischio_att*(1-wr/100))
+                    trade_stimati  = int(mancano/guadagno_medio) if guadagno_medio>0 else 999
+                    send_telegram(
+                        "*STATO OBIETTIVO*\n"
+                        "========================\n"
+                        "{} {:.1f}%\n\n"
+                        "Saldo attuale : *{:.4f} EUR*\n"
+                        "Obiettivo     : *{:.0f} EUR*\n"
+                        "Mancano       : *{:.4f} EUR*\n\n"
+                        "Peak storico  : {:.4f} EUR\n"
+                        "Drawdown att. : {:.1f}%\n\n"
+                        "Fase corrente : *{}*\n"
+                        "Rischio trade : *{:.1f}%*\n"
+                        "Win Rate      : *{:.1f}%*\n\n"
+                        "Trade stimati per 1.000 EUR: ~{}".format(
+                            barra,progresso,
+                            saldo_virtuale,TARGET_FINALE,mancano,
+                            peak_saldo,drawdown,
+                            fase_corrente.upper(),rischio_att*100,wr,
+                            trade_stimati))
+                    continue
                 if parola in ["pausa","sospendi"]:
                     pausa_bot_fino=adesso()+timedelta(hours=2)
                     send_telegram("Agente in pausa per 2 ore.\nScrivi *riprendi* per riattivare."); continue
@@ -1087,10 +1271,19 @@ def bot_loop():
                     if trade_attivo["in_attesa_risultato"] or trade_attivo["aperto"]:
                         registra_risultato(msg_in)
                     else:
-                        send_telegram("Agente online!\nSaldo: *{:.2f} EUR*\nML: {}\n\n"
-                                      "Scrivi *filtri* per lo stato\n"
-                                      "Scrivi *report* per report dettagliato".format(
-                            saldo_virtuale,"Attivo" if ML_MODEL else "N/D"))
+                        rischio_att = calcola_rischio_kelly(saldo_virtuale,stats,peak_saldo)
+                    progresso   = min(saldo_virtuale/TARGET_FINALE*100,100.0)
+                    send_telegram(
+                        "Agente online!\n"
+                        "Saldo    : *{:.4f} EUR*\n"
+                        "Progresso: *{:.1f}%* verso 1.000 EUR\n"
+                        "Fase     : *{}*\n"
+                        "Rischio  : *{:.1f}%* per trade\n"
+                        "ML       : {}\n\n"
+                        "Scrivi *obiettivo* per lo stato completo\n"
+                        "Scrivi *filtri* per la telemetria".format(
+                        saldo_virtuale,progresso,fase_corrente.upper(),
+                        rischio_att*100,"Attivo" if ML_MODEL else "N/D"))
                     continue
 
             ora_t=time.time()
